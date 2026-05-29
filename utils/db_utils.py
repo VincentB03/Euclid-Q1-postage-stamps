@@ -1,6 +1,9 @@
-from astroquery.esa.euclid import Euclid
 import os
 import glob
+import numpy as np
+from astropy.io import fits
+from astropy.wcs import WCS
+from astroquery.esa.euclid import Euclid
 
 
 def get_optimal_observation_ids(round_decimals=1, verbose=True):
@@ -297,3 +300,152 @@ def sync_psf_model(data_dir, verbose=True):
         print("PSF model sync completed successfully.\n")
         
     return psf_full_path
+
+
+def sync_observation_catalogs(obs_id_list, data_dir, verbose=True):
+    """
+    Computes spatial footprints from local science images, queries the Euclid Archive 
+    for cross-matched multi-table catalogs (MER + PHZ), and saves them as FITS tables.
+
+    Args:
+        obs_id_list (list): List of observation IDs to process.
+        data_dir (str): Directory path where science images are stored and catalogs will be saved.
+        verbose (bool): Shows or hides detailed console logs (default: True).
+
+    Returns:
+        dict: A dictionary mapping observation_id to its local catalog FITS file path.
+    """
+    if verbose:
+        print(f"Syncing catalogs for {len(obs_id_list)} observation IDs...")
+
+    # Look for the large local science detection frames to compute spatial footprints
+    large_sci_files = glob.glob(os.path.join(data_dir, '*-DET-*.fits'))
+    catalog_paths = {}
+
+    for obs_id in obs_id_list:
+        obs_id_padded = str(obs_id).zfill(6)
+        cat_dst = os.path.join(data_dir, f'catalogue_obs_{obs_id_padded}.fits')
+
+        # Check if the catalog file is already present on disk
+        if os.path.exists(cat_dst):
+            catalog_paths[obs_id] = cat_dst
+            if verbose:
+                print(f"\n  SKIP: Catalog for obs_id {obs_id} already exists ({os.path.basename(cat_dst)}).")
+            continue
+
+        # Find the corresponding science image to extract WCS footprint
+        matching_files = [f for f in large_sci_files if f"-{obs_id_padded}-" in os.path.basename(f)]
+
+        if not matching_files:
+            if verbose:
+                print(f"\n  WARNING: Science image not found for obs_id {obs_id}. Cannot compute footprint.")
+            continue
+
+        big_image_path = matching_files[0]
+        if verbose:
+            print(f"\n  Computing spatial footprint from: {os.path.basename(big_image_path)}")
+
+        ra_all, dec_all = [], []
+        try:
+            # Parse all .SCI extensions to map out the total bounding box
+            with fits.open(big_image_path) as hdul:
+                for ext in hdul:
+                    if ext.name.endswith('.SCI'):
+                        h = ext.header
+                        w = WCS(h)
+                        nx, ny = h['NAXIS1'], h['NAXIS2']
+
+                        # Coordinate pairs for the 4 corners of this specific detector
+                        corners = np.array([[0, 0], [nx, 0], [nx, ny], [0, ny]], dtype=float)
+                        ra, dec = w.all_pix2world(corners[:, 0], corners[:, 1], 0)
+                        ra_all.extend(ra)
+                        dec_all.extend(dec)
+        except Exception as e:
+            if verbose:
+                print(f"  Error: Failed to read WCS coordinates for obs_id {obs_id}: {e}")
+            continue
+
+        if not ra_all:
+            if verbose:
+                print(f"  WARNING: No coordinates extracted for obs_id {obs_id}.")
+            continue
+
+        # Extract strict bounding box limits
+        ra_min, ra_max = min(ra_all), max(ra_all)
+        dec_min, dec_max = min(dec_all), max(dec_all)
+        
+        if verbose:
+            print(f"    Global search area: RA=[{ra_min:.4f}, {ra_max:.4f}], DEC=[{dec_min:.4f}, {dec_max:.4f}]")
+            print("    Launching ADQL query to Euclid Archive...")
+
+        # Construct comprehensive cross-matched ADQL Query
+        query = f"""
+        SELECT
+        m.object_id,
+        m.right_ascension,
+        m.declination,
+        m.right_ascension_psf_fitting,
+        m.declination_psf_fitting,
+
+        m.FLUX_VIS_1FWHM_APER, m.FLUXERR_VIS_1FWHM_APER,
+        m.flux_vis_2fwhm_aper, m.fluxerr_vis_2fwhm_aper,
+        m.flux_vis_3fwhm_aper, m.fluxerr_vis_3fwhm_aper,
+        m.flux_vis_psf, m.fluxerr_vis_psf,
+        m.flux_detection_total, m.fluxerr_detection_total,
+        m.flux_segmentation, m.fluxerr_segmentation,
+
+        m.semimajor_axis, m.semimajor_axis_err,
+        m.ellipticity, m.ellipticity_err,
+        m.position_angle, m.position_angle_err,
+        m.kron_radius, m.kron_radius_err, m.fwhm,
+
+        m.point_like_flag, m.point_like_prob,
+        m.extended_flag, m.extended_prob,
+        m.spurious_flag, m.spurious_prob,
+
+        m.flag_vis, m.vis_det,
+        m.deblended_flag, m.det_quality_flag,
+
+        m.mu_max, m.mumax_minus_mag, m.segmentation_area, m.segmentation_map_id,
+
+        p.FLUX_VIS_UNIF,
+
+        morph.disk_sersic_sersic_index
+
+        FROM catalogue.mer_catalogue AS m
+
+        INNER JOIN catalogue.phz_photo_z AS p
+        ON m.object_id = p.object_id
+
+        INNER JOIN catalogue.mer_morphology AS morph
+        ON morph.object_id = m.object_id
+
+        WHERE m.right_ascension BETWEEN {ra_min} AND {ra_max}
+          AND m.declination BETWEEN {dec_min} AND {dec_max}
+        """
+
+        try:
+            # Query the database
+            job_cat = Euclid.launch_job_async(query)
+            cat = job_cat.get_results()
+
+            if len(cat) > 0:
+                if verbose:
+                    print(f"    SUCCESS: {len(cat)} sources found for this observation.")
+                # Save as a local FITS file table
+                cat.write(cat_dst, format='fits', overwrite=True)
+                catalog_paths[obs_id] = cat_dst
+                if verbose:
+                    print(f"    File saved: {os.path.basename(cat_dst)}")
+            else:
+                if verbose:
+                    print("    WARNING: Query succeeded but returned an empty catalog for this region.")
+
+        except Exception as e:
+            if verbose:
+                print(f"    ERROR: Failed to download catalog for obs_id {obs_id}: {e}")
+
+    if verbose:
+        print("\nCatalog synchronization pipeline complete.\n")
+
+    return catalog_paths
