@@ -1,3 +1,6 @@
+import numpy as np
+from config import PSF_SIZE
+
 class EuclidPSFModel:
     """
     Code from SHINE repository https://github.com/CosmoStat/SHINE
@@ -18,8 +21,8 @@ class EuclidPSFModel:
         quad_nx: Quadrant width in pixels.
         quad_ny: Quadrant height in pixels.
     """
-    
-    def __init__(self, psf_data: np.ndarray, stamp_size: int = TAILLE_PSF, grid_nx: int = 9, grid_ny: int = 9, quad_nx: int = 2048, quad_ny: int = 2066) -> None:
+
+    def __init__(self, psf_data: np.ndarray, stamp_size: int = PSF_SIZE, grid_nx: int = 9, grid_ny: int = 9, quad_nx: int = 2048, quad_ny: int = 2066) -> None:
         self.stamps = psf_data.reshape(grid_ny, stamp_size, grid_nx, stamp_size).transpose(0, 2, 1, 3)
         self.stamp_size = stamp_size
         self.grid_nx = grid_nx
