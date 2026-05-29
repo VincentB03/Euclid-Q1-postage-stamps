@@ -1,9 +1,9 @@
-import pandas as pd
 from astroquery.esa.euclid import Euclid
+
 
 def get_optimal_observation_ids(round_decimals=1, verbose=True):
     """
-    Retrieves the optimal observation IDs (1st dither only) to obtain 
+    Retrieves the optimal observation IDs (1st dither only) to obtain
     a unique spatial coverage on the VIS instrument in Q1 data.
 
     Args:
@@ -32,7 +32,7 @@ def get_optimal_observation_ids(round_decimals=1, verbose=True):
     if verbose:
         print("Calculating optimal spatial coverage (1st dither only)...\n")
 
-    # Isolate the 1st dither by removing duplicate observation IDs 
+    # Isolate the 1st dither by removing duplicate observation IDs
     df_first_dither = df.drop_duplicates(subset=['observation_id']).copy()
 
     # Spatial rounding to approximate the tiles
