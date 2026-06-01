@@ -449,3 +449,262 @@ def sync_observation_catalogs(obs_id_list, data_dir, verbose=True):
         print("\nCatalog synchronization pipeline complete.\n")
 
     return catalog_paths
+
+
+def extract_quadrants_from_frames(data_dir, quadrant_dir, quadrants_list, verbose=True):
+    """
+    Extracts specific quadrants (.SCI, .RMS, .FLG) from full Euclid VIS 
+    science frames and saves them as smaller, standalone FITS files.
+
+    Args:
+        data_dir (str): Directory containing the full '*-DET-*.fits' science frames.
+        quadrant_dir (str): Directory where the extracted quadrant FITS files will be saved.
+        quadrants_list (list): List of quadrant strings to extract (e.g., ['1-1.E', '3-4.F']).
+        verbose (bool): Shows or hides detailed console logs (default: True).
+
+    Returns:
+        dict: A dictionary mapping the original full FITS filename to a list 
+              of its extracted quadrant file paths.
+    """
+    if verbose:
+        print(f"Extracting quadrants to {quadrant_dir}...")
+
+    # Locate all main science detection frames
+    science_files = glob.glob(os.path.join(data_dir, '*-DET-*.fits'))
+    extracted_files_map = {}
+
+    for sci_file in science_files:
+        filename = os.path.basename(sci_file)
+        if verbose:
+            print(f"\n  Processing image: {filename}")
+
+        quadrants_to_extract = []
+        destinations = {}
+        extracted_files_map[filename] = []
+
+        # Determine which quadrants actually need to be extracted
+        for quadrant in quadrants_list:
+            safe_quad_name = quadrant.replace(".", "-")
+            out_basename = filename.replace('.fits', f'_{safe_quad_name}.fits')
+            dst = os.path.join(quadrant_dir, out_basename)
+            
+            # Keep track of the final paths regardless of whether they existed before
+            extracted_files_map[filename].append(dst)
+
+            if not os.path.exists(dst):
+                quadrants_to_extract.append(quadrant)
+                destinations[quadrant] = dst
+
+        if not quadrants_to_extract:
+            if verbose:
+                print(f"    -> SKIP: All requested quadrants ({len(quadrants_list)}) are already extracted on disk.")
+            continue
+
+        if verbose:
+            print(f"    -> {len(quadrants_to_extract)} quadrant(s) to extract. Opening FITS file")
+
+        try:
+            with fits.open(sci_file) as hdul:
+                # Keep the PrimaryHDU to preserve the global observation metadata
+                primary_hdu = fits.PrimaryHDU(header=hdul[0].header)
+
+                for quadrant in quadrants_to_extract:
+                    dst = destinations[quadrant]
+                    sci_ext = f'{quadrant}.SCI'
+                    rms_ext = f'{quadrant}.RMS'
+                    flg_ext = f'{quadrant}.FLG'
+
+                    # Verify that the required extensions exist in this FITS file
+                    if sci_ext in hdul and rms_ext in hdul and flg_ext in hdul:
+                        new_hdus = [
+                            primary_hdu,
+                            hdul[sci_ext].copy(),
+                            hdul[rms_ext].copy(),
+                            hdul[flg_ext].copy()
+                        ]
+
+                        # Save the new quadrant-specific FITS file
+                        new_hdul = fits.HDUList(new_hdus)
+                        new_hdul.writeto(dst, overwrite=True)
+                    else:
+                        if verbose:
+                            print(f"      WARNING: Extensions for '{quadrant}' missing in this FITS file. Skipped.")
+
+        except Exception as e:
+            if verbose:
+                print(f"    ERROR: Failed to read or process {filename}: {e}")
+
+    if verbose:
+        print("\nQuadrant extraction operation completed.\n")
+
+    return extracted_files_map
+
+
+def extract_quadrants_from_backgrounds(data_dir, quadrant_dir, quadrants_list, verbose=True):
+    """
+    Extracts specific quadrants from full Euclid VIS background (BKG) frames 
+    and saves them as smaller, standalone FITS files.
+
+    Args:
+        data_dir (str): Directory containing the full '*-BKG-*.fits' background frames.
+        quadrant_dir (str): Directory where the extracted quadrant FITS files will be saved.
+        quadrants_list (list): List of quadrant strings to extract (e.g., ['1-1.E', '3-4.F']).
+        verbose (bool): Shows or hides detailed console logs (default: True).
+
+    Returns:
+        dict: A dictionary mapping the original full BKG filename to a list 
+              of its extracted quadrant file paths.
+    """
+    if verbose:
+        print(f"Extracting background quadrants to {quadrant_dir}...")
+
+    # Locate all background frames
+    bkg_files_list = glob.glob(os.path.join(data_dir, '*-BKG-*.fits'))
+    extracted_bkg_map = {}
+
+    for bkg_file in bkg_files_list:
+        filename = os.path.basename(bkg_file)
+        if verbose:
+            print(f"\n  Processing background image: {filename}")
+
+        quadrants_to_extract = []
+        destinations = {}
+        extracted_bkg_map[filename] = []
+
+        # Determine which background quadrants actually need to be extracted
+        for quadrant in quadrants_list:
+            safe_quad_name = quadrant.replace(".", "-")
+            out_basename = filename.replace('.fits', f'_{safe_quad_name}.fits')
+            dst = os.path.join(quadrant_dir, out_basename)
+            
+            # Keep track of the final paths
+            extracted_bkg_map[filename].append(dst)
+
+            if not os.path.exists(dst):
+                quadrants_to_extract.append(quadrant)
+                destinations[quadrant] = dst
+
+        if not quadrants_to_extract:
+            if verbose:
+                print(f"    -> SKIP: All requested BKG quadrants ({len(quadrants_list)}) are already extracted on disk.")
+            continue
+
+        if verbose:
+            print(f"    -> {len(quadrants_to_extract)} quadrant(s) to extract. Opening BKG FITS file")
+
+        try:
+            with fits.open(bkg_file) as hdul:
+                # Keep the PrimaryHDU to preserve global metadata
+                primary_hdu = fits.PrimaryHDU(header=hdul[0].header)
+                success_count = 0
+
+                for quadrant in quadrants_to_extract:
+                    dst = destinations[quadrant]
+
+                    # Note: Background files usually have the quadrant name directly as the extension name
+                    if quadrant in hdul:
+                        new_hdus = [
+                            primary_hdu,
+                            hdul[quadrant].copy()
+                        ]
+
+                        # Save the new quadrant-specific FITS file
+                        new_hdul = fits.HDUList(new_hdus)
+                        new_hdul.writeto(dst, overwrite=True)
+                        success_count += 1
+                    else:
+                        if verbose:
+                            print(f"      WARNING: Extension '{quadrant}' missing in this BKG FITS file. Skipped.")
+
+                if verbose:
+                    print(f"    -> {success_count} BKG quadrant(s) successfully saved.")
+
+        except Exception as e:
+            if verbose:
+                print(f"    ERROR: Failed to read or process {filename}: {e}")
+
+    if verbose:
+        print("\nBackground quadrant extraction operation completed.\n")
+
+    return extracted_bkg_map
+
+
+def extract_quadrants_from_psf(psf_full_path, quadrant_dir, quadrants_list, verbose=True):
+    """
+    Extracts specific quadrants from the global Euclid VIS PSF model file 
+    and saves them as standalone FITS files.
+
+    Args:
+        psf_full_path (str): The absolute path to the global PSF model FITS file.
+        quadrant_dir (str): Directory where the extracted PSF quadrant FITS files will be saved.
+        quadrants_list (list): List of quadrant strings to extract (e.g., ['1-1.E', '3-4.F']).
+        verbose (bool): Shows or hides detailed console logs (default: True).
+
+    Returns:
+        list: A list of the absolute file paths to the successfully extracted PSF quadrants.
+    """
+    if verbose:
+        print(f"Extracting PSF quadrants to {quadrant_dir}...")
+
+    if not os.path.exists(psf_full_path):
+        if verbose:
+            print(f"  ERROR: Global PSF model file not found at {psf_full_path}.")
+        return []
+
+    extracted_psf_paths = []
+    quadrants_to_extract = []
+    destinations = {}
+
+    # Check which PSF quadrants already exist locally
+    for quadrant in quadrants_list:
+        safe_quad_name = quadrant.replace(".", "-")
+        psf_dst = os.path.join(quadrant_dir, f'PSF_{safe_quad_name}.fits')
+        
+        extracted_psf_paths.append(psf_dst)
+
+        if not os.path.exists(psf_dst):
+            quadrants_to_extract.append(quadrant)
+            destinations[quadrant] = psf_dst
+
+    if not quadrants_to_extract:
+        if verbose:
+            print(f"  -> SKIP: All requested PSF quadrants ({len(quadrants_list)}) are already extracted.")
+        return extracted_psf_paths
+
+    if verbose:
+        print(f"  -> {len(quadrants_to_extract)} PSF quadrant(s) to extract. Opening global PSF model")
+
+    try:
+        with fits.open(psf_full_path) as hdul:
+            # Keep the PrimaryHDU to preserve the global PSF metadata
+            primary_hdu = fits.PrimaryHDU(header=hdul[0].header)
+            success_count = 0
+
+            for quadrant in quadrants_to_extract:
+                dst = destinations[quadrant]
+
+                # Ensure the requested quadrant exists in the global PSF model
+                if quadrant in hdul:
+                    new_hdus = [
+                        primary_hdu,
+                        hdul[quadrant].copy()
+                    ]
+                    
+                    new_hdul = fits.HDUList(new_hdus)
+                    new_hdul.writeto(dst, overwrite=True)
+                    success_count += 1
+                else:
+                    if verbose:
+                        print(f"    WARNING: Extension '{quadrant}' not found in global PSF model. Skipped.")
+
+            if verbose:
+                print(f"  -> {success_count} PSF quadrant(s) successfully saved.")
+
+    except Exception as e:
+        if verbose:
+            print(f"  ERROR: Failed to process global PSF file: {e}")
+
+    if verbose:
+        print("PSF quadrant extraction completed.\n")
+
+    return extracted_psf_paths
