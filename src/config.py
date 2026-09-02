@@ -2,13 +2,40 @@ import os
 from astroquery.esa.euclid import Euclid
 
 
-PSF_SIZE = 21
-STAMP_SIZE = 64
-POINT_PROB = 0.5
-DISTANCE = 46
-PIXEL_SIZE = 0.1
+PSF_SIZE = 21           # side of an interpolated PSF stamp (EuclidPSFModel)
+STAMP_SIZE = 64         # side of a science/noise/mask postage stamp
+POINT_PROB = 0.5        # max point_like_prob kept (more point-like -> dropped)
+DISTANCE = 46           # stamp "diagonal" used in the isolation cut, in pixels
+PIXEL_SIZE = 0.1        # VIS pixel scale, arcsec/pixel
 
-DATA_DIR = '/content/drive/MyDrive/Q1_VIS_CALIBRATED_DB' #code used on Colab with Google Drive, change to local path if needed
+# Catalogue quality cuts (dataset_builder.select_sources)
+FLUX_MIN = 0.57544
+FLUX_MAX = 575.44
+MAX_SPURIOUS_PROB = 0.2
+
+# Stamp quality
+FLAG_BITMASK = 1 | 262144        # VIS FLG bits rejected (bit 0 + bit 18)
+MAX_BAD_PIXEL_FRACTION = 0.10    # drop a stamp at/above this fraction of flagged pixels
+
+# Hugging Face target dataset
+HF_REPO_ID = 'VincentB03/euclid-Q1-V2'
+
+# Data location. Set the EUCLID_DATA_DIR environment variable to either a Google
+# Drive path (Colab) or any local path. If it is unset, fall back to the Drive
+# mount point when running on Colab, otherwise to a local 'data' folder at the
+# repository root.
+_DRIVE_DATA_DIR = '/content/drive/MyDrive/Q1_VIS_CALIBRATED_DB'
+_LOCAL_DATA_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    'data', 'Q1_VIS_CALIBRATED_DB',
+)
+
+
+def _default_data_dir():
+    return _DRIVE_DATA_DIR if os.path.isdir('/content/drive/MyDrive') else _LOCAL_DATA_DIR
+
+
+DATA_DIR = os.path.expanduser(os.environ.get('EUCLID_DATA_DIR') or _default_data_dir())
 os.makedirs(DATA_DIR, exist_ok=True)
 Euclid.ROW_LIMIT = -1
 

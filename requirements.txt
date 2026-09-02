@@ -1,0 +1,6 @@
+astroquery
+astropy
+numpy
+pandas
+datasets
+huggingface_hub

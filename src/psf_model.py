@@ -1,4 +1,8 @@
+import os
+
 import numpy as np
+from astropy.io import fits
+
 from config import PSF_SIZE
 
 class EuclidPSFModel:
@@ -50,3 +54,120 @@ class EuclidPSFModel:
         if total > 0:
             stamp = stamp / total
         return stamp
+
+
+# ---------------------------------------------------------------------------
+# Residual PSF kernels
+#
+# Each per-object PSF stamp is modelled as ``psf_ref (*) kernel`` where
+# ``psf_ref`` is a fixed isotropic reference PSF and ``(*)`` is a 2-D
+# convolution.  The *residual kernel* is what the stamp adds on top of that
+# reference (anisotropy, breathing, ...) and is recovered by a division in
+# Fourier space.
+# ---------------------------------------------------------------------------
+
+# Drop the isotropic reference PSF FITS here (added manually).
+DEFAULT_REFERENCE_PSF = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'euclid_vis_isotropic_min_psf.fits'
+)
+
+
+def centered_fft2(image: np.ndarray) -> np.ndarray:
+    """Forward FFT of a centred PSF (peak in the middle of the array).
+
+    ``ifftshift`` first moves the central pixel to index ``(0, 0)`` so the
+    transform carries no linear phase ramp.  Operates on the last two axes,
+    so ``image`` may be 2-D ``(ny, nx)`` or a stack ``(n, ny, nx)``.
+    """
+    return np.fft.fft2(np.fft.ifftshift(image, axes=(-2, -1)), axes=(-2, -1))
+
+
+def centered_ifft2(spectrum: np.ndarray) -> np.ndarray:
+    """Inverse of :func:`centered_fft2`: return a centred real-valued image."""
+    return np.fft.fftshift(np.fft.ifft2(spectrum, axes=(-2, -1)).real, axes=(-2, -1))
+
+
+def load_reference_psf(path: str = DEFAULT_REFERENCE_PSF, normalize: bool = True) -> np.ndarray:
+    """Load the isotropic reference PSF used to build residual kernels.
+
+    Args:
+        path: Path to the reference PSF FITS file.  The first HDU holding a
+            2-D array is used.
+        normalize: If True, rescale so the PSF sums to 1.
+
+    Returns:
+        The reference PSF as a 2-D float64 array.
+    """
+    with fits.open(path) as hdul:
+        data = next(h.data for h in hdul if h.data is not None and np.ndim(h.data) == 2)
+
+    psf_ref = np.asarray(data, dtype=np.float64)
+    if normalize:
+        total = psf_ref.sum()
+        if total > 0:
+            psf_ref = psf_ref / total
+    return psf_ref
+
+
+def compute_psf_residual(psf_stamp: np.ndarray, psf_ref: np.ndarray,
+                         ref_fft: np.ndarray = None, epsilon: float = 0.0) -> np.ndarray:
+    """Compute the residual PSF kernel(s) of ``psf_stamp`` relative to ``psf_ref``.
+
+    Solves ``psf_stamp = psf_ref (*) kernel`` for ``kernel`` by dividing the
+    two in Fourier space.
+
+    Args:
+        psf_stamp: A single PSF stamp ``(ny, nx)`` or a stack ``(n, ny, nx)``.
+        psf_ref: The reference PSF, matching the ``(ny, nx)`` of each stamp.
+        ref_fft: Optional pre-computed ``centered_fft2(psf_ref)``; pass it to
+            avoid recomputing the reference transform on every call/batch.
+        epsilon: Tikhonov regularisation on the (power-normalised) division.
+            ``0.0`` reproduces the plain Fourier division; a small positive
+            value damps high-frequency noise amplification.
+
+    Returns:
+        The residual kernel(s), a real array centred (peak in the middle)
+        with the same shape as ``psf_stamp``.
+    """
+    psf_stamp = np.asarray(psf_stamp, dtype=np.float64)
+    psf_ref = np.asarray(psf_ref, dtype=np.float64)
+
+    if psf_stamp.shape[-2:] != psf_ref.shape:
+        raise ValueError(
+            f"PSF stamp shape {psf_stamp.shape[-2:]} and reference shape "
+            f"{psf_ref.shape} are incompatible."
+        )
+
+    b = centered_fft2(psf_ref) if ref_fft is None else ref_fft
+    x = centered_fft2(psf_stamp)
+
+    if epsilon > 0:
+        kernel_fft = x * np.conj(b) / (np.abs(b) ** 2 + epsilon)
+    else:
+        kernel_fft = x / b
+
+    return centered_ifft2(kernel_fft)
+
+
+def reconvolve_psf(residual_kernel: np.ndarray, psf_ref: np.ndarray,
+                   ref_fft: np.ndarray = None) -> np.ndarray:
+    """Rebuild PSF stamp(s) from residual kernel(s): ``psf_ref (*) residual_kernel``.
+
+    Inverse of :func:`compute_psf_residual` with ``epsilon=0``.  Use it to
+    check that a residual kernel round-trips back to the original stamp.
+
+    Args:
+        residual_kernel: A kernel ``(ny, nx)`` or a stack ``(n, ny, nx)``.
+        psf_ref: The reference PSF, matching the ``(ny, nx)`` of each kernel.
+        ref_fft: Optional pre-computed ``centered_fft2(psf_ref)``.
+
+    Returns:
+        The reconstructed PSF stamp(s), centred, same shape as
+        ``residual_kernel``.
+    """
+    residual_kernel = np.asarray(residual_kernel, dtype=np.float64)
+    psf_ref = np.asarray(psf_ref, dtype=np.float64)
+
+    b = centered_fft2(psf_ref) if ref_fft is None else ref_fft
+    k = centered_fft2(residual_kernel)
+    return centered_ifft2(b * k)

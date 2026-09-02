@@ -1,0 +1,297 @@
+"""Build the Euclid Q1 VIS postage-stamp dataset.
+
+For every selected, isolated source in each observation catalogue, cut a
+background-subtracted ``STAMP_SIZE`` science stamp with its noise map,
+bad-pixel mask and locally interpolated PSF, then assemble the records into a
+``datasets.Dataset``. Work is parallelised one observation per process.
+
+Multiprocessing uses 'spawn' on macOS, so scripts that call
+``build_dataset`` / ``iter_records`` must guard the entry point with
+``if __name__ == "__main__":``.
+"""
+
+import functools
+import glob
+import multiprocessing
+import os
+import re
+import warnings
+
+import numpy as np
+from astropy.coordinates import SkyCoord
+from astropy.io import fits
+from astropy.nddata import Cutout2D
+from astropy.table import Table
+from astropy.wcs import WCS
+from datasets import Array2D, Dataset, Features, Value
+
+from config import (
+    DATA_DIR,
+    DISTANCE,
+    FLAG_BITMASK,
+    FLUX_MAX,
+    FLUX_MIN,
+    HF_REPO_ID,
+    MAX_BAD_PIXEL_FRACTION,
+    MAX_SPURIOUS_PROB,
+    PIXEL_SIZE,
+    POINT_PROB,
+    PSF_SIZE,
+    QUADRANT_DIR,
+    QUADRANTS,
+    STAMP_SIZE,
+)
+from psf_model import EuclidPSFModel
+
+# Filename pattern of an extracted science quadrant (see utils/db_utils.py).
+_FRAME_RE = re.compile(r'-DET-(\d{6}-\d{2}-\d+)-.*_([1-6]-[1-6]-[E-H])\.fits')
+
+# Schema of one dataset row.
+HF_FEATURES = Features({
+    "obs_id": Value("string"),
+    "quadrant": Value("string"),
+    "ra": Value("float32"),
+    "dec": Value("float32"),
+    "obj_id": Value("int64"),
+    "flux": Value("float32"),
+    "sci_subtracted": Array2D(shape=(STAMP_SIZE, STAMP_SIZE), dtype="float32"),
+    "noise_map": Array2D(shape=(STAMP_SIZE, STAMP_SIZE), dtype="float32"),
+    "binary_mask": Array2D(shape=(STAMP_SIZE, STAMP_SIZE), dtype="int32"),
+    "psf_stamp": Array2D(shape=(PSF_SIZE, PSF_SIZE), dtype="float32"),
+})
+
+
+# ---------------------------------------------------------------------------
+# Catalogue selection
+# ---------------------------------------------------------------------------
+def catalogue_path(obs_id, data_dir=DATA_DIR):
+    """Local path of the catalogue FITS written by ``sync_observation_catalogs``."""
+    return os.path.join(data_dir, f'catalogue_obs_{str(obs_id).zfill(6)}.fits')
+
+
+def select_sources(catalogue):
+    """Keep catalogue rows that pass the MER quality cuts."""
+    mask = (
+        (catalogue['point_like_prob'] <= POINT_PROB)
+        & (catalogue['FLUX_VIS_UNIF'] >= FLUX_MIN)
+        & (catalogue['FLUX_VIS_UNIF'] <= FLUX_MAX)
+        & (catalogue['det_quality_flag'] == 0)
+        & (catalogue['deblended_flag'] == 0)
+        & (catalogue['spurious_prob'] <= MAX_SPURIOUS_PROB)
+    )
+    return catalogue[mask]
+
+
+def apply_isolation_cut(sources, catalogue, distance=DISTANCE, pixel_size=PIXEL_SIZE):
+    """Drop sources whose 2nd-nearest catalogue neighbour is too close.
+
+    Minimum separation (arcsec) is
+    ``(distance + neighbour_semimajor_axis // 2) * pixel_size``.
+    """
+    if len(sources) == 0:
+        return sources
+
+    all_coords = SkyCoord(catalogue['right_ascension'], catalogue['declination'],
+                          unit="deg", frame="icrs")
+    src_coords = SkyCoord(sources['right_ascension'], sources['declination'],
+                          unit="deg", frame="icrs")
+
+    idx, d2d, _ = src_coords.match_to_catalog_sky(all_coords, nthneighbor=2)
+    neighbour_size = catalogue['semimajor_axis'][idx]
+    min_arcsec = (distance + neighbour_size // 2) * pixel_size
+    return sources[d2d.arcsec > min_arcsec]
+
+
+# ---------------------------------------------------------------------------
+# Stamp extraction
+# ---------------------------------------------------------------------------
+def _resolve_files(obs_id, quadrant, quadrant_dir):
+    """``(sci_path, bkg_path, psf_path)`` for one obs_id/quadrant, or None."""
+    q_str = quadrant.replace(".", "-")
+    sci_files = glob.glob(os.path.join(quadrant_dir, f'*DET*{obs_id}*_{q_str}.fits'))
+    if not sci_files:
+        return None
+
+    sci_path = sci_files[0]
+    m = _FRAME_RE.search(os.path.basename(sci_path))
+    if not m:
+        return None
+
+    core_id, quadrant_str = m.group(1), m.group(2)
+    bkg_files = glob.glob(os.path.join(quadrant_dir, f"*-BKG-{core_id}-*_{quadrant_str}.fits"))
+    psf_files = glob.glob(os.path.join(quadrant_dir, f"*PSF*_{quadrant_str}.fits"))
+    if not bkg_files or not psf_files:
+        return None
+
+    return sci_path, bkg_files[0], psf_files[0]
+
+
+def _extract_stamp(source, obs_id, quadrant, sci_data, bkg_data, flg_data, rms_data,
+                   wcs, psf_model, stamp_size=STAMP_SIZE):
+    """Build one record dict for ``source``, or None if it fails a cut."""
+    position = SkyCoord(source['right_ascension'], source['declination'],
+                        unit="deg", frame="icrs")
+    try:
+        cutout = Cutout2D(sci_data, position, (stamp_size, stamp_size),
+                          wcs=wcs, mode='strict')
+
+        y_slice, x_slice = cutout.slices_original
+        bkg_stamp = bkg_data[y_slice, x_slice]
+        flg_stamp = flg_data[y_slice, x_slice]
+        rms_stamp = rms_data[y_slice, x_slice]
+
+        bad_pixels = (flg_stamp & FLAG_BITMASK) != 0
+        if bad_pixels.sum() / bad_pixels.size >= MAX_BAD_PIXEL_FRACTION:
+            return None
+
+        # Flagged pixels keep their real (science - background) value; they are
+        # only counted for the fraction cut above and recorded in binary_mask.
+        sci_sub = cutout.data.astype(float) - bkg_stamp
+        binary_mask = np.where(bad_pixels, 0, 1).astype(np.int32)
+
+        x_pix, y_pix = cutout.position_original
+        psf_stamp = psf_model.interpolate_at(float(x_pix), float(y_pix))
+
+        return {
+            "obs_id": str(obs_id),
+            "quadrant": str(quadrant),
+            "ra": float(source['right_ascension']),
+            "dec": float(source['declination']),
+            "obj_id": int(source['object_id']),
+            "flux": float(source['FLUX_VIS_UNIF']),
+            "sci_subtracted": sci_sub,
+            "noise_map": rms_stamp,
+            "binary_mask": binary_mask,
+            "psf_stamp": psf_stamp,
+        }
+    except Exception:
+        return None
+
+
+def _process_quadrant(obs_id, quadrant, sci_path, bkg_path, psf_path, sources,
+                      stamp_size=STAMP_SIZE, psf_size=PSF_SIZE):
+    """Records for every source in ``sources`` that fits inside this quadrant."""
+    with fits.open(psf_path) as hdul_psf:
+        psf_raw = next(ext.data for ext in hdul_psf
+                       if ext.data is not None and ext.data.ndim == 2)
+    psf_model = EuclidPSFModel(psf_raw, stamp_size=psf_size)
+
+    records = []
+    with fits.open(sci_path, memmap=True) as hdul_sci, \
+            fits.open(bkg_path, memmap=True) as hdul_bkg:
+        sci_data = hdul_sci[f'{quadrant}.SCI'].data
+        flg_data = hdul_sci[f'{quadrant}.FLG'].data
+        rms_data = hdul_sci[f'{quadrant}.RMS'].data
+        wcs = WCS(hdul_sci[f'{quadrant}.SCI'].header)
+        bkg_data = hdul_bkg[1].data
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            for source in sources:
+                record = _extract_stamp(source, obs_id, quadrant, sci_data, bkg_data,
+                                        flg_data, rms_data, wcs, psf_model, stamp_size)
+                if record is not None:
+                    records.append(record)
+    return records
+
+
+# ---------------------------------------------------------------------------
+# Per-observation worker + record generators
+# ---------------------------------------------------------------------------
+def process_obs_id(obs_id, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR, quadrants=QUADRANTS):
+    """Every stamp record for one observation (one parallel work unit)."""
+    cat_path = catalogue_path(obs_id, data_dir)
+    if not os.path.exists(cat_path):
+        return []
+
+    catalogue = Table.read(cat_path)
+    sources = apply_isolation_cut(select_sources(catalogue), catalogue)
+    if len(sources) == 0:
+        return []
+
+    records = []
+    for quadrant in quadrants:
+        resolved = _resolve_files(obs_id, quadrant, quadrant_dir)
+        if resolved is None:
+            continue
+        sci_path, bkg_path, psf_path = resolved
+        records.extend(
+            _process_quadrant(obs_id, quadrant, sci_path, bkg_path, psf_path, sources)
+        )
+    return records
+
+
+def iter_records(obs_ids, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR,
+                 quadrants=QUADRANTS, processes=None):
+    """Yield one record dict per stamp, one observation per worker.
+
+    ``processes=1`` runs sequentially (handy for debugging); otherwise an
+    ``imap_unordered`` pool of ``processes`` workers (default: all cores).
+    """
+    worker = functools.partial(process_obs_id, data_dir=data_dir,
+                               quadrant_dir=quadrant_dir, quadrants=list(quadrants))
+
+    if processes == 1:
+        for obs_id in obs_ids:
+            yield from worker(obs_id)
+        return
+
+    with multiprocessing.Pool(processes=processes or multiprocessing.cpu_count()) as pool:
+        for batch in pool.imap_unordered(worker, list(obs_ids)):
+            yield from batch
+
+
+# ---------------------------------------------------------------------------
+# Dataset assembly
+# ---------------------------------------------------------------------------
+def build_dataset(obs_ids, quadrants=QUADRANTS, data_dir=DATA_DIR,
+                  quadrant_dir=QUADRANT_DIR, processes=None):
+    """Materialise the postage-stamp dataset from the record generator."""
+    return Dataset.from_generator(
+        iter_records,
+        features=HF_FEATURES,
+        gen_kwargs={
+            "obs_ids": list(obs_ids),
+            "data_dir": data_dir,
+            "quadrant_dir": quadrant_dir,
+            "quadrants": list(quadrants),
+            "processes": processes,
+        },
+    )
+
+
+def push_dataset(dataset, repo_id=HF_REPO_ID, private=True, token=None):
+    """Push to the Hub. Token from ``token`` or the ``HF_TOKEN`` env var."""
+    dataset.push_to_hub(repo_id, private=private,
+                        token=token or os.environ.get("HF_TOKEN"))
+
+
+def merge_and_push(new_dataset, repo_id=HF_REPO_ID, private=True, token=None):
+    """Concatenate with the existing Hub dataset, then push the union back."""
+    from datasets import concatenate_datasets, load_dataset
+
+    token = token or os.environ.get("HF_TOKEN")
+    existing = load_dataset(repo_id, split="train", token=token)
+    merged = concatenate_datasets([existing, new_dataset])
+    push_dataset(merged, repo_id, private, token)
+    return merged
+
+
+def add_psf_residual(dataset, reference_psf_path=None, batch_size=256):
+    """Add a ``psf_residual`` column: kernel such that ``psf_ref (*) kernel = psf_stamp``.
+
+    Needs the isotropic reference PSF FITS (see ``psf_model.DEFAULT_REFERENCE_PSF``).
+    """
+    from psf_model import centered_fft2, compute_psf_residual, load_reference_psf
+
+    psf_ref = (load_reference_psf() if reference_psf_path is None
+               else load_reference_psf(reference_psf_path))
+    ref_fft = centered_fft2(psf_ref)
+
+    def _batch(batch):
+        stamps = np.asarray(batch["psf_stamp"], dtype=np.float64)
+        kernels = compute_psf_residual(stamps, psf_ref, ref_fft=ref_fft)
+        batch["psf_residual"] = [k.astype(np.float32) for k in kernels]
+        return batch
+
+    return dataset.map(_batch, batched=True, batch_size=batch_size)
