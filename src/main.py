@@ -89,11 +89,17 @@ def acquire(obs_ids, verbose=True):
     sync_observation_catalogs(obs_ids, DATA_DIR, verbose=verbose)
 
 
-def extract(verbose=True):
-    """Slice the downloaded full-frame FITS into per-quadrant files."""
+def extract(obs_ids, verbose=True):
+    """Slice the downloaded full-frame FITS into per-quadrant files.
+
+    Only frames matching ``obs_ids`` are scanned/extracted; the PSF model is
+    global and always processed in full.
+    """
     psf_path = sync_psf_model(DATA_DIR, verbose=verbose)  # idempotent: locate on disk
-    extract_quadrants_from_frames(DATA_DIR, QUADRANT_DIR, QUADRANTS, verbose=verbose)
-    extract_quadrants_from_backgrounds(DATA_DIR, QUADRANT_DIR, QUADRANTS, verbose=verbose)
+    extract_quadrants_from_frames(DATA_DIR, QUADRANT_DIR, QUADRANTS, obs_ids=obs_ids,
+                                  verbose=verbose)
+    extract_quadrants_from_backgrounds(DATA_DIR, QUADRANT_DIR, QUADRANTS, obs_ids=obs_ids,
+                                       verbose=verbose)
     extract_quadrants_from_psf(psf_path, QUADRANT_DIR, QUADRANTS, verbose=verbose)
 
 
@@ -163,7 +169,7 @@ def main(argv=None):
         if verbose:
             print("[extract] skipped")
     else:
-        extract(verbose=verbose)
+        extract(obs_ids, verbose=verbose)
 
     if args.skip_build:
         if verbose:

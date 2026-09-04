@@ -451,26 +451,33 @@ def sync_observation_catalogs(obs_id_list, data_dir, verbose=True):
     return catalog_paths
 
 
-def extract_quadrants_from_frames(data_dir, quadrant_dir, quadrants_list, verbose=True):
+def extract_quadrants_from_frames(data_dir, quadrant_dir, quadrants_list, obs_ids=None,
+                                  verbose=True):
     """
-    Extracts specific quadrants (.SCI, .RMS, .FLG) from full Euclid VIS 
+    Extracts specific quadrants (.SCI, .RMS, .FLG) from full Euclid VIS
     science frames and saves them as smaller, standalone FITS files.
 
     Args:
         data_dir (str): Directory containing the full '*-DET-*.fits' science frames.
         quadrant_dir (str): Directory where the extracted quadrant FITS files will be saved.
         quadrants_list (list): List of quadrant strings to extract (e.g., ['1-1.E', '3-4.F']).
+        obs_ids (list, optional): Restrict extraction to frames matching these observation
+            IDs. Defaults to None, i.e. every '*-DET-*.fits' frame found in ``data_dir``.
         verbose (bool): Shows or hides detailed console logs (default: True).
 
     Returns:
-        dict: A dictionary mapping the original full FITS filename to a list 
+        dict: A dictionary mapping the original full FITS filename to a list
               of its extracted quadrant file paths.
     """
     if verbose:
         print(f"Extracting quadrants to {quadrant_dir}...")
 
-    # Locate all main science detection frames
+    # Locate all main science detection frames, restricted to the requested obs_ids
     science_files = glob.glob(os.path.join(data_dir, '*-DET-*.fits'))
+    if obs_ids is not None:
+        padded_ids = {str(obs_id).zfill(6) for obs_id in obs_ids}
+        science_files = [f for f in science_files
+                         if any(f'-{oid}-' in os.path.basename(f) for oid in padded_ids)]
     extracted_files_map = {}
 
     for sci_file in science_files:
@@ -540,26 +547,33 @@ def extract_quadrants_from_frames(data_dir, quadrant_dir, quadrants_list, verbos
     return extracted_files_map
 
 
-def extract_quadrants_from_backgrounds(data_dir, quadrant_dir, quadrants_list, verbose=True):
+def extract_quadrants_from_backgrounds(data_dir, quadrant_dir, quadrants_list, obs_ids=None,
+                                       verbose=True):
     """
-    Extracts specific quadrants from full Euclid VIS background (BKG) frames 
+    Extracts specific quadrants from full Euclid VIS background (BKG) frames
     and saves them as smaller, standalone FITS files.
 
     Args:
         data_dir (str): Directory containing the full '*-BKG-*.fits' background frames.
         quadrant_dir (str): Directory where the extracted quadrant FITS files will be saved.
         quadrants_list (list): List of quadrant strings to extract (e.g., ['1-1.E', '3-4.F']).
+        obs_ids (list, optional): Restrict extraction to frames matching these observation
+            IDs. Defaults to None, i.e. every '*-BKG-*.fits' frame found in ``data_dir``.
         verbose (bool): Shows or hides detailed console logs (default: True).
 
     Returns:
-        dict: A dictionary mapping the original full BKG filename to a list 
+        dict: A dictionary mapping the original full BKG filename to a list
               of its extracted quadrant file paths.
     """
     if verbose:
         print(f"Extracting background quadrants to {quadrant_dir}...")
 
-    # Locate all background frames
+    # Locate all background frames, restricted to the requested obs_ids
     bkg_files_list = glob.glob(os.path.join(data_dir, '*-BKG-*.fits'))
+    if obs_ids is not None:
+        padded_ids = {str(obs_id).zfill(6) for obs_id in obs_ids}
+        bkg_files_list = [f for f in bkg_files_list
+                          if any(f'-{oid}-' in os.path.basename(f) for oid in padded_ids)]
     extracted_bkg_map = {}
 
     for bkg_file in bkg_files_list:
