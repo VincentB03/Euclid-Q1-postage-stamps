@@ -217,7 +217,8 @@ def main(argv=None):
             print(f"[output] merging into {args.repo_id} and pushing ...")
         pushed = merge_and_push(dataset, repo_id=args.repo_id, private=private,
                                 token=args.hf_token,
-                                drop_duplicates=args.drop_duplicates)
+                                drop_duplicates=args.drop_duplicates,
+                                verbose=verbose)
         run_params["output_mode"] = "merge (concatenated with existing Hub dataset)"
         if verbose:
             print(f"[output] pushed {len(pushed)} row(s) to {args.repo_id}")

@@ -303,9 +303,14 @@ def drop_duplicate_obj_ids(dataset, verbose=True):
             continue
         seen.add(obj_id)
         keep.append(i)
-    if verbose and len(keep) != len(dataset):
-        print(f"[drop-duplicates] removed {len(dataset) - len(keep)} duplicate "
-              f"obj_id row(s); {len(keep)} unique row(s) kept")
+    if verbose:
+        n_removed = len(dataset) - len(keep)
+        if n_removed:
+            print(f"[drop-duplicates] removed {n_removed} duplicate "
+                  f"obj_id row(s); {len(keep)} unique row(s) kept")
+        else:
+            print(f"[drop-duplicates] no duplicate obj_id found; "
+                  f"{len(keep)} row(s) kept")
     return dataset.select(keep)
 
 
@@ -316,7 +321,7 @@ def push_dataset(dataset, repo_id=HF_REPO_ID, private=True, token=None):
 
 
 def merge_and_push(new_dataset, repo_id=HF_REPO_ID, private=True, token=None,
-                   drop_duplicates=False):
+                   drop_duplicates=False, verbose=True):
     """Concatenate with the existing Hub dataset, then push the union back.
 
     With ``drop_duplicates`` the merged dataset is reduced to one row per
@@ -328,7 +333,7 @@ def merge_and_push(new_dataset, repo_id=HF_REPO_ID, private=True, token=None,
     existing = load_dataset(repo_id, split="train", token=token)
     merged = concatenate_datasets([existing, new_dataset])
     if drop_duplicates:
-        merged = drop_duplicate_obj_ids(merged)
+        merged = drop_duplicate_obj_ids(merged, verbose=verbose)
     push_dataset(merged, repo_id, private, token)
     return merged
 
