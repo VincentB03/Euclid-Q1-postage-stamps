@@ -14,7 +14,8 @@ The pipeline has three parts:
 2. **Build** — for every selected, isolated catalogue source, cut a
    background-subtracted stamp with its noise and mask, interpolate the PSF at
    the source position, and collect the records into a
-   [`datasets.Dataset`](https://huggingface.co/docs/datasets).
+   [`datasets.Dataset`](https://huggingface.co/docs/datasets). Optionally
+   de-duplicated down to one row per `obj_id`.
 3. **Output** — save the dataset locally and/or push it to the Hugging Face Hub.
 
 ---
@@ -114,6 +115,11 @@ python src/main.py --limit 17 --skip-acquire --skip-extract --push
 
 # Append newly built stamps to the existing Hub dataset
 python src/main.py --obs-ids 2698 2699 --skip-acquire --skip-extract --merge
+
+# Same, but drop duplicate obj_id rows within the new batch and against the
+# existing Hub dataset (existing rows win over colliding new ones)
+python src/main.py --obs-ids 2698 2699 --skip-acquire --skip-extract \
+  --merge --drop-duplicates
 ```
 
 By default nothing is uploaded: the dataset is written to
@@ -133,6 +139,7 @@ push).
 | | `--skip-build` | Stop after acquisition + extraction |
 | Build | `--processes N` | Build workers (default: all cores; `1` = sequential) |
 | | `--no-residual` | Do not add the `psf_residual` column |
+| | `--drop-duplicates` | Enforce at most one row per `obj_id` in the final dataset |
 | | `--reference-psf PATH` | Isotropic reference PSF FITS (default: `src/euclid_vis_isotropic_min_psf.fits`) |
 | Output | `--push` | Push a fresh dataset to the Hub |
 | | `--merge` | Concatenate with the existing Hub dataset, then push |
@@ -216,7 +223,25 @@ Per observation (`process_obs_id`), then per quadrant:
 `multiprocessing.Pool.imap_unordered`; pass `processes=1` for a single-process
 run.
 
-### 5. Residual PSF (optional)
+### 5. De-duplicate (optional, `--drop-duplicates`)
+
+`drop_duplicate_obj_ids(dataset)` reduces the dataset to at most one row per
+`obj_id` (first occurrence wins) — useful because a source near a quadrant
+boundary can be selected from more than one quadrant, and an observation can
+overlap its neighbours. When it actually removes rows, it prints how many:
+
+```
+[drop-duplicates] removed 2 duplicate obj_id row(s); 4 unique row(s) kept
+```
+
+Applied twice when relevant:
+
+* right after the build, on the freshly built dataset alone;
+* again in `merge_and_push` when both `--merge` and `--drop-duplicates` are
+  set, on the concatenated dataset — existing Hub rows come first, so they win
+  over colliding new ones.
+
+### 6. Residual PSF (optional)
 
 `add_psf_residual(dataset)` adds a `psf_residual` column. Each `psf_stamp` is
 modelled as `reference_psf (*) kernel`, and the kernel is recovered by dividing
@@ -225,12 +250,13 @@ isotropic 21 × 21 stamp in `src/euclid_vis_isotropic_min_psf.fits`.
 `reconvolve_psf` inverts the operation and is useful to check that a kernel
 round-trips back to its stamp.
 
-### 6. Output
+### 7. Output
 
 * `dataset.save_to_disk(dir)` — local Arrow dataset.
 * `push_dataset(dataset)` — `push_to_hub`, token from `HF_TOKEN`.
-* `merge_and_push(dataset)` — `load_dataset(repo_id)` + `concatenate_datasets`
-  + `push_to_hub`, for incrementally growing the Hub dataset across runs.
+* `merge_and_push(dataset, drop_duplicates=...)` — `load_dataset(repo_id)` +
+  `concatenate_datasets` + optional dedup + `push_to_hub`, for incrementally
+  growing the Hub dataset across runs.
 
 ---
 
