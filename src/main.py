@@ -8,6 +8,8 @@ Stages, run in order (each can be skipped once done):
   5. dedup     enforce one row per obj_id (optional, --drop-duplicates)
   6. residual  add the ``psf_residual`` column (optional)
   7. output    save locally and/or push to the Hugging Face Hub
+               (a push also refreshes the "Build info" section of the Hub
+               README: columns, obs_ids, row count, run parameters)
 
 Hub pushes read the token from ``--hf-token`` or the ``HF_TOKEN`` env var.
 
@@ -40,6 +42,7 @@ from dataset_builder import (  # noqa: E402
     drop_duplicate_obj_ids,
     merge_and_push,
     push_dataset,
+    update_dataset_card,
 )
 from utils.db_utils import (  # noqa: E402
     extract_quadrants_from_backgrounds,
@@ -183,21 +186,48 @@ def main(argv=None):
             print("[residual] adding psf_residual column ...")
         dataset = add_psf_residual(dataset, reference_psf_path=args.reference_psf)
 
+    run_params = {
+        "command": "python " + " ".join(sys.argv[1:] if argv is None else argv),
+        "obs_selection": (
+            "explicit --obs-ids" if args.obs_ids
+            else f"--obs-ids-file {args.obs_ids_file}" if args.obs_ids_file
+            else f"optimal set (--limit {args.limit})" if args.limit is not None
+            else "all optimal observations"
+        ),
+        "processes": args.processes if args.processes is not None else "all cores",
+        "psf_residual": not args.no_residual,
+        "reference_psf": args.reference_psf or "default (src/euclid_vis_isotropic_min_psf.fits)",
+        "drop_duplicates": args.drop_duplicates,
+    }
+
     private = not args.public
+    pushed = None
     if args.merge:
         if verbose:
             print(f"[output] merging into {args.repo_id} and pushing ...")
-        merged = merge_and_push(dataset, repo_id=args.repo_id, private=private,
+        pushed = merge_and_push(dataset, repo_id=args.repo_id, private=private,
                                 token=args.hf_token,
                                 drop_duplicates=args.drop_duplicates)
+        run_params["output_mode"] = "merge (concatenated with existing Hub dataset)"
         if verbose:
-            print(f"[output] pushed {len(merged)} row(s) to {args.repo_id}")
+            print(f"[output] pushed {len(pushed)} row(s) to {args.repo_id}")
     elif args.push:
         if verbose:
             print(f"[output] pushing to {args.repo_id} ...")
         push_dataset(dataset, repo_id=args.repo_id, private=private, token=args.hf_token)
+        pushed = dataset
+        run_params["output_mode"] = "fresh push"
         if verbose:
             print(f"[output] pushed {len(dataset)} row(s) to {args.repo_id}")
+
+    if pushed is not None:
+        run_params["visibility"] = "public" if args.public else "private"
+        try:
+            update_dataset_card(args.repo_id, pushed, run_params, token=args.hf_token)
+            if verbose:
+                print(f"[output] build-info section updated in {args.repo_id} README")
+        except Exception as exc:  # noqa: BLE001 - card update must not fail the run
+            print(f"[output] WARNING: could not update dataset card: {exc}")
 
     if args.save_to or not (args.push or args.merge):
         target = args.save_to or os.path.join(DATA_DIR, "dataset")

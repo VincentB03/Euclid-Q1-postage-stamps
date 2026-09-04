@@ -16,6 +16,7 @@ import multiprocessing
 import os
 import re
 import warnings
+from datetime import datetime, timezone
 
 import numpy as np
 from astropy.coordinates import SkyCoord
@@ -297,6 +298,67 @@ def merge_and_push(new_dataset, repo_id=HF_REPO_ID, private=True, token=None,
         merged = drop_duplicate_obj_ids(merged)
     push_dataset(merged, repo_id, private, token)
     return merged
+
+
+# ---------------------------------------------------------------------------
+# Hub dataset card
+# ---------------------------------------------------------------------------
+_CARD_START = "<!-- BUILD-INFO:START -->"
+_CARD_END = "<!-- BUILD-INFO:END -->"
+
+
+def render_build_info(dataset, params=None):
+    """Markdown block describing how ``dataset`` was produced by ``src/main.py``."""
+    obs_ids = sorted(set(dataset["obs_id"]))
+    columns = "\n".join(
+        f"| `{name}` | {feat} |" for name, feat in dataset.features.items()
+    )
+    param_rows = "\n".join(
+        f"| `{k}` | {v} |" for k, v in (params or {}).items()
+    ) or "| _(none)_ | |"
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    return "\n".join([
+        _CARD_START,
+        "## Build info",
+        "",
+        f"_Automatically written by `src/main.py` at push time ({stamp})._",
+        "",
+        f"- **Rows in this dataset:** {len(dataset)}",
+        f"- **Observation IDs ({len(obs_ids)}):** {', '.join(obs_ids)}",
+        "",
+        "### Columns",
+        "",
+        "| column | feature |",
+        "| --- | --- |",
+        columns,
+        "",
+        "### Run parameters",
+        "",
+        "| parameter | value |",
+        "| --- | --- |",
+        param_rows,
+        _CARD_END,
+    ])
+
+
+def update_dataset_card(repo_id, dataset, params=None, token=None):
+    """Refresh the ``BUILD-INFO`` section of the Hub dataset card in place."""
+    from huggingface_hub import DatasetCard
+
+    token = token or os.environ.get("HF_TOKEN")
+    card = DatasetCard.load(repo_id, token=token)
+    block = render_build_info(dataset, params)
+
+    text = card.text or ""
+    if _CARD_START in text and _CARD_END in text:
+        head = text.split(_CARD_START, 1)[0].rstrip()
+        tail = text.split(_CARD_END, 1)[1].lstrip()
+        card.text = f"{head}\n\n{block}\n\n{tail}".rstrip() + "\n"
+    else:
+        card.text = f"{text.rstrip()}\n\n{block}\n"
+
+    card.push_to_hub(repo_id, token=token)
 
 
 def add_psf_residual(dataset, reference_psf_path=None, batch_size=256):
