@@ -255,7 +255,7 @@ def build_dataset(obs_ids, quadrants=QUADRANTS, data_dir=DATA_DIR,
             "obs_ids": list(obs_ids),
             "data_dir": data_dir,
             "quadrant_dir": quadrant_dir,
-            "quadrants": list(quadrants),
+            "quadrants": tuple(quadrants),
             "processes": processes,
         },
     )
