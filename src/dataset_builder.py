@@ -139,7 +139,11 @@ def _extract_stamp(source, obs_id, quadrant, sci_data, bkg_data, flg_data, rms_d
         y_slice, x_slice = cutout.slices_original
         bkg_stamp = bkg_data[y_slice, x_slice]
         flg_stamp = flg_data[y_slice, x_slice]
-        rms_stamp = rms_data[y_slice, x_slice]
+        # .astype() forces native byte order: FITS data is big-endian, and raw
+        # slices (unlike sci_sub/binary_mask below, which go through an
+        # arithmetic op that already converts) keep that byte order, which
+        # pyarrow's writer rejects ("Byte-swapped arrays not supported").
+        rms_stamp = rms_data[y_slice, x_slice].astype(np.float32)
 
         bad_pixels = (flg_stamp & FLAG_BITMASK) != 0
         if bad_pixels.sum() / bad_pixels.size >= MAX_BAD_PIXEL_FRACTION:
