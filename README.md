@@ -237,8 +237,7 @@ be skewed by them), even though a generative model's loss can be told to
 ignore them via `binary_mask` at training time.
 
 With `--zero-flagged-pixels`, those pixels are set to `0.0` directly in
-`sci_subtracted` (matching the exploratory notebook this pipeline was
-originally ported from) — the stamp's value range is no longer skewed by
+`sci_subtracted` — the stamp's value range is no longer skewed by
 defects, at the cost of discarding their real value (which some tasks, e.g.
 inpainting-style training, may actually want).
 
