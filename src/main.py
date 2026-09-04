@@ -8,8 +8,9 @@ Stages, run in order (each can be skipped once done):
   5. dedup     enforce one row per obj_id (optional, --drop-duplicates)
   6. residual  add the ``psf_residual`` column (optional)
   7. output    save locally and/or push to the Hugging Face Hub
-               (a push also refreshes the "Build info" section of the Hub
-               README: columns, obs_ids, row count, run parameters)
+               (a push appends a "Build info" block at the end of the Hub
+               README -- exact CLI command, columns, obs_ids, row count,
+               run parameters -- leaving any existing card text untouched)
 
 Hub pushes read the token from ``--hf-token`` or the ``HF_TOKEN`` env var.
 
@@ -27,6 +28,7 @@ Examples
 
 import argparse
 import os
+import shlex
 import sys
 
 _SRC_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -186,8 +188,10 @@ def main(argv=None):
             print("[residual] adding psf_residual column ...")
         dataset = add_psf_residual(dataset, reference_psf_path=args.reference_psf)
 
+    cli_args = list(argv) if argv is not None else sys.argv[1:]
+    cli_command = "python " + shlex.join([sys.argv[0], *cli_args])
+
     run_params = {
-        "command": "python " + " ".join(sys.argv[1:] if argv is None else argv),
         "obs_selection": (
             "explicit --obs-ids" if args.obs_ids
             else f"--obs-ids-file {args.obs_ids_file}" if args.obs_ids_file
@@ -223,7 +227,8 @@ def main(argv=None):
     if pushed is not None:
         run_params["visibility"] = "public" if args.public else "private"
         try:
-            update_dataset_card(args.repo_id, pushed, run_params, token=args.hf_token)
+            update_dataset_card(args.repo_id, pushed, run_params,
+                                command=cli_command, token=args.hf_token)
             if verbose:
                 print(f"[output] build-info section updated in {args.repo_id} README")
         except Exception as exc:  # noqa: BLE001 - card update must not fail the run

@@ -307,7 +307,7 @@ _CARD_START = "<!-- BUILD-INFO:START -->"
 _CARD_END = "<!-- BUILD-INFO:END -->"
 
 
-def render_build_info(dataset, params=None):
+def render_build_info(dataset, params=None, command=None):
     """Markdown block describing how ``dataset`` was produced by ``src/main.py``."""
     obs_ids = sorted(set(dataset["obs_id"]))
     columns = "\n".join(
@@ -318,14 +318,27 @@ def render_build_info(dataset, params=None):
     ) or "| _(none)_ | |"
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    return "\n".join([
+    lines = [
         _CARD_START,
         "## Build info",
         "",
-        f"_Automatically written by `src/main.py` at push time ({stamp})._",
+        f"_Automatically appended by `src/main.py` at push time ({stamp}). "
+        "Everything above this line is preserved as-is; only this block is "
+        "regenerated on each push._",
         "",
         f"- **Rows in this dataset:** {len(dataset)}",
         f"- **Observation IDs ({len(obs_ids)}):** {', '.join(obs_ids)}",
+    ]
+    if command:
+        lines += [
+            "",
+            "### Command used to build this dataset",
+            "",
+            "```bash",
+            command,
+            "```",
+        ]
+    lines += [
         "",
         "### Columns",
         "",
@@ -339,24 +352,33 @@ def render_build_info(dataset, params=None):
         "| --- | --- |",
         param_rows,
         _CARD_END,
-    ])
+    ]
+    return "\n".join(lines)
 
 
-def update_dataset_card(repo_id, dataset, params=None, token=None):
-    """Refresh the ``BUILD-INFO`` section of the Hub dataset card in place."""
+def update_dataset_card(repo_id, dataset, params=None, command=None, token=None):
+    """Append/refresh the ``BUILD-INFO`` block at the end of the Hub dataset card.
+
+    Any hand-written presentation in the card is kept untouched: a previous
+    ``BUILD-INFO`` block (wherever it sits) is stripped, then a fresh one is
+    appended after the existing text.
+    """
+    import re as _re
+
     from huggingface_hub import DatasetCard
 
     token = token or os.environ.get("HF_TOKEN")
     card = DatasetCard.load(repo_id, token=token)
-    block = render_build_info(dataset, params)
 
-    text = card.text or ""
-    if _CARD_START in text and _CARD_END in text:
-        head = text.split(_CARD_START, 1)[0].rstrip()
-        tail = text.split(_CARD_END, 1)[1].lstrip()
-        card.text = f"{head}\n\n{block}\n\n{tail}".rstrip() + "\n"
-    else:
-        card.text = f"{text.rstrip()}\n\n{block}\n"
+    text = _re.sub(
+        _re.escape(_CARD_START) + r".*?" + _re.escape(_CARD_END),
+        "",
+        card.text or "",
+        flags=_re.DOTALL,
+    ).rstrip()
+
+    block = render_build_info(dataset, params, command)
+    card.text = f"{text}\n\n{block}\n" if text else f"{block}\n"
 
     card.push_to_hub(repo_id, token=token)
 
