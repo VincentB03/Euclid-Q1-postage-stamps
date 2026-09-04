@@ -172,7 +172,7 @@ def main(argv=None):
 
     if verbose:
         print("[build] cutting stamps ...")
-    dataset = build_dataset(obs_ids, processes=args.processes)
+    dataset = build_dataset(obs_ids, processes=args.processes, verbose=verbose)
     if verbose:
         print(f"[build] {len(dataset)} stamp(s)")
     if len(dataset) == 0:

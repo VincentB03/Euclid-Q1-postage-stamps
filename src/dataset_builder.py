@@ -199,46 +199,74 @@ def _process_quadrant(obs_id, quadrant, sci_path, bkg_path, psf_path, sources,
 # ---------------------------------------------------------------------------
 # Per-observation worker + record generators
 # ---------------------------------------------------------------------------
-def process_obs_id(obs_id, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR, quadrants=QUADRANTS):
+def process_obs_id(obs_id, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR, quadrants=QUADRANTS,
+                   verbose=False):
     """Every stamp record for one observation (one parallel work unit)."""
     cat_path = catalogue_path(obs_id, data_dir)
     if not os.path.exists(cat_path):
+        if verbose:
+            print(f"-> [obs {obs_id}] no catalogue found, skipping.")
         return []
 
     catalogue = Table.read(cat_path)
     sources = apply_isolation_cut(select_sources(catalogue), catalogue)
     if len(sources) == 0:
+        if verbose:
+            print(f"-> [obs {obs_id}] no source survives the cuts, skipping.")
         return []
 
+    n_quadrants = len(quadrants)
+    if verbose:
+        print(f"-> [obs {obs_id}] {len(sources)} source(s) after cuts; "
+              f"scanning {n_quadrants} quadrant(s)...")
+
     records = []
-    for quadrant in quadrants:
+    for i, quadrant in enumerate(quadrants, start=1):
         resolved = _resolve_files(obs_id, quadrant, quadrant_dir)
         if resolved is None:
+            if verbose:
+                print(f"   [obs {obs_id}] quadrant {i}/{n_quadrants} ({quadrant}): "
+                      f"missing file(s), skipped.")
             continue
         sci_path, bkg_path, psf_path = resolved
-        records.extend(
-            _process_quadrant(obs_id, quadrant, sci_path, bkg_path, psf_path, sources)
-        )
+        new_records = _process_quadrant(obs_id, quadrant, sci_path, bkg_path, psf_path, sources)
+        records.extend(new_records)
+        if verbose:
+            print(f"   [obs {obs_id}] quadrant {i}/{n_quadrants} ({quadrant}): "
+                  f"{len(new_records)} stamp(s) -> {len(records)} total")
+
+    if verbose:
+        print(f"-> [obs {obs_id}] done: {len(records)} stamp(s).")
     return records
 
 
 def iter_records(obs_ids, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR,
-                 quadrants=QUADRANTS, processes=None):
+                 quadrants=QUADRANTS, processes=None, verbose=False):
     """Yield one record dict per stamp, one observation per worker.
 
     ``processes=1`` runs sequentially (handy for debugging); otherwise an
     ``imap_unordered`` pool of ``processes`` workers (default: all cores).
     """
+    obs_ids = list(obs_ids)
     worker = functools.partial(process_obs_id, data_dir=data_dir,
-                               quadrant_dir=quadrant_dir, quadrants=list(quadrants))
+                               quadrant_dir=quadrant_dir, quadrants=list(quadrants),
+                               verbose=verbose)
 
     if processes == 1:
-        for obs_id in obs_ids:
+        for j, obs_id in enumerate(obs_ids, start=1):
+            if verbose:
+                print(f"[build] observation {j}/{len(obs_ids)}: obs_id {obs_id}")
             yield from worker(obs_id)
         return
 
+    if verbose:
+        n_workers = processes or multiprocessing.cpu_count()
+        print(f"[build] processing {len(obs_ids)} observation(s) with {n_workers} worker(s)...")
     with multiprocessing.Pool(processes=processes or multiprocessing.cpu_count()) as pool:
-        for batch in pool.imap_unordered(worker, list(obs_ids)):
+        for j, batch in enumerate(pool.imap_unordered(worker, obs_ids), start=1):
+            if verbose:
+                print(f"[build] {j}/{len(obs_ids)} observation(s) done, "
+                      f"{len(batch)} stamp(s) in this batch")
             yield from batch
 
 
@@ -246,7 +274,7 @@ def iter_records(obs_ids, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR,
 # Dataset assembly
 # ---------------------------------------------------------------------------
 def build_dataset(obs_ids, quadrants=QUADRANTS, data_dir=DATA_DIR,
-                  quadrant_dir=QUADRANT_DIR, processes=None):
+                  quadrant_dir=QUADRANT_DIR, processes=None, verbose=False):
     """Materialise the postage-stamp dataset from the record generator."""
     return Dataset.from_generator(
         iter_records,
@@ -257,6 +285,7 @@ def build_dataset(obs_ids, quadrants=QUADRANTS, data_dir=DATA_DIR,
             "quadrant_dir": quadrant_dir,
             "quadrants": tuple(quadrants),
             "processes": processes,
+            "verbose": verbose,
         },
     )
 
