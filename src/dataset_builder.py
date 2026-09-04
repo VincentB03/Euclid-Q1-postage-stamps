@@ -128,7 +128,7 @@ def _resolve_files(obs_id, quadrant, quadrant_dir):
 
 
 def _extract_stamp(source, obs_id, quadrant, sci_data, bkg_data, flg_data, rms_data,
-                   wcs, psf_model, stamp_size=STAMP_SIZE):
+                   wcs, psf_model, stamp_size=STAMP_SIZE, zero_flagged_pixels=False):
     """Build one record dict for ``source``, or None if it fails a cut."""
     position = SkyCoord(source['right_ascension'], source['declination'],
                         unit="deg", frame="icrs")
@@ -149,9 +149,13 @@ def _extract_stamp(source, obs_id, quadrant, sci_data, bkg_data, flg_data, rms_d
         if bad_pixels.sum() / bad_pixels.size >= MAX_BAD_PIXEL_FRACTION:
             return None
 
-        # Flagged pixels keep their real (science - background) value; they are
-        # only counted for the fraction cut above and recorded in binary_mask.
+        # By default, flagged pixels keep their real (science - background) value;
+        # they are only counted for the fraction cut above and recorded in
+        # binary_mask. With zero_flagged_pixels=True they are zeroed out here
+        # instead (see build_dataset's docstring for the tradeoff).
         sci_sub = cutout.data.astype(float) - bkg_stamp
+        if zero_flagged_pixels:
+            sci_sub[bad_pixels] = 0.0
         binary_mask = np.where(bad_pixels, 0, 1).astype(np.int32)
 
         x_pix, y_pix = cutout.position_original
@@ -174,7 +178,7 @@ def _extract_stamp(source, obs_id, quadrant, sci_data, bkg_data, flg_data, rms_d
 
 
 def _process_quadrant(obs_id, quadrant, sci_path, bkg_path, psf_path, sources,
-                      stamp_size=STAMP_SIZE, psf_size=PSF_SIZE):
+                      stamp_size=STAMP_SIZE, psf_size=PSF_SIZE, zero_flagged_pixels=False):
     """Records for every source in ``sources`` that fits inside this quadrant."""
     with fits.open(psf_path) as hdul_psf:
         psf_raw = next(ext.data for ext in hdul_psf
@@ -194,7 +198,8 @@ def _process_quadrant(obs_id, quadrant, sci_path, bkg_path, psf_path, sources,
             warnings.simplefilter('ignore')
             for source in sources:
                 record = _extract_stamp(source, obs_id, quadrant, sci_data, bkg_data,
-                                        flg_data, rms_data, wcs, psf_model, stamp_size)
+                                        flg_data, rms_data, wcs, psf_model, stamp_size,
+                                        zero_flagged_pixels=zero_flagged_pixels)
                 if record is not None:
                     records.append(record)
     return records
@@ -204,7 +209,7 @@ def _process_quadrant(obs_id, quadrant, sci_path, bkg_path, psf_path, sources,
 # Per-observation worker + record generators
 # ---------------------------------------------------------------------------
 def process_obs_id(obs_id, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR, quadrants=QUADRANTS,
-                   verbose=False):
+                   zero_flagged_pixels=False, verbose=False):
     """Every stamp record for one observation (one parallel work unit)."""
     cat_path = catalogue_path(obs_id, data_dir)
     if not os.path.exists(cat_path):
@@ -233,7 +238,8 @@ def process_obs_id(obs_id, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR, quadran
                       f"missing file(s), skipped.")
             continue
         sci_path, bkg_path, psf_path = resolved
-        new_records = _process_quadrant(obs_id, quadrant, sci_path, bkg_path, psf_path, sources)
+        new_records = _process_quadrant(obs_id, quadrant, sci_path, bkg_path, psf_path, sources,
+                                        zero_flagged_pixels=zero_flagged_pixels)
         records.extend(new_records)
         if verbose:
             print(f"   [obs {obs_id}] quadrant {i}/{n_quadrants} ({quadrant}): "
@@ -245,7 +251,8 @@ def process_obs_id(obs_id, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR, quadran
 
 
 def iter_records(obs_ids, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR,
-                 quadrants=QUADRANTS, processes=None, verbose=False):
+                 quadrants=QUADRANTS, processes=None, zero_flagged_pixels=False,
+                 verbose=False):
     """Yield one record dict per stamp, one observation per worker.
 
     ``processes=1`` runs sequentially (handy for debugging); otherwise an
@@ -254,7 +261,7 @@ def iter_records(obs_ids, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR,
     obs_ids = list(obs_ids)
     worker = functools.partial(process_obs_id, data_dir=data_dir,
                                quadrant_dir=quadrant_dir, quadrants=list(quadrants),
-                               verbose=verbose)
+                               zero_flagged_pixels=zero_flagged_pixels, verbose=verbose)
 
     if processes == 1:
         for j, obs_id in enumerate(obs_ids, start=1):
@@ -278,8 +285,29 @@ def iter_records(obs_ids, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR,
 # Dataset assembly
 # ---------------------------------------------------------------------------
 def build_dataset(obs_ids, quadrants=QUADRANTS, data_dir=DATA_DIR,
-                  quadrant_dir=QUADRANT_DIR, processes=None, verbose=False):
-    """Materialise the postage-stamp dataset from the record generator."""
+                  quadrant_dir=QUADRANT_DIR, processes=None, zero_flagged_pixels=False,
+                  verbose=False):
+    """Materialise the postage-stamp dataset from the record generator.
+
+    ``zero_flagged_pixels`` controls what ``sci_subtracted`` holds at pixels
+    flagged bad in ``FLG`` (see ``FLAG_BITMASK``):
+
+    - ``False`` (default): keep their real (science - background) value.
+      Since a handful of defective pixels can carry extreme values (hot
+      pixels, cosmic rays, saturation), they can dominate the stamp's value
+      range even though they are a small minority of it -- a problem if
+      something naively looks at min/max or a raw display, even though a
+      generative model's loss can be told to ignore them via
+      ``binary_mask``.
+    - ``True``: zero them out directly in ``sci_subtracted`` (matches the
+      original exploratory notebook this pipeline was ported from).
+
+    Neither option is strictly better: zeroing loses the real pixel value
+    (useful e.g. for inpainting-style tasks) but gives a display/statistics
+    that isn't skewed by defects; keeping it preserves information but
+    requires consistently applying ``binary_mask`` downstream. Pick based on
+    what consumes the dataset.
+    """
     return Dataset.from_generator(
         iter_records,
         features=HF_FEATURES,
@@ -289,6 +317,7 @@ def build_dataset(obs_ids, quadrants=QUADRANTS, data_dir=DATA_DIR,
             "quadrant_dir": quadrant_dir,
             "quadrants": tuple(quadrants),
             "processes": processes,
+            "zero_flagged_pixels": zero_flagged_pixels,
             "verbose": verbose,
         },
     )

@@ -134,6 +134,9 @@ def build_parser():
                    help="do not add the psf_residual column")
     p.add_argument("--drop-duplicates", action="store_true",
                    help="enforce at most one row per obj_id in the final dataset")
+    p.add_argument("--zero-flagged-pixels", action="store_true",
+                   help="zero out flagged pixels in sci_subtracted instead of keeping "
+                        "their real value (see README for the tradeoff)")
     p.add_argument("--reference-psf", metavar="PATH", default=None,
                    help="isotropic reference PSF FITS "
                         "(default: src/euclid_vis_isotropic_min_psf.fits)")
@@ -178,7 +181,8 @@ def main(argv=None):
 
     if verbose:
         print("[build] cutting stamps ...")
-    dataset = build_dataset(obs_ids, processes=args.processes, verbose=verbose)
+    dataset = build_dataset(obs_ids, processes=args.processes,
+                            zero_flagged_pixels=args.zero_flagged_pixels, verbose=verbose)
     if verbose:
         print(f"[build] {len(dataset)} stamp(s)")
     if len(dataset) == 0:
@@ -208,6 +212,7 @@ def main(argv=None):
         "psf_residual": not args.no_residual,
         "reference_psf": args.reference_psf or "default (src/euclid_vis_isotropic_min_psf.fits)",
         "drop_duplicates": args.drop_duplicates,
+        "zero_flagged_pixels": args.zero_flagged_pixels,
     }
 
     private = not args.public

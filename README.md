@@ -31,7 +31,7 @@ One row per source (`src/dataset_builder.py::HF_FEATURES`):
 | `ra`, `dec`      | `float32`           | Source coordinates (deg, ICRS) |
 | `obj_id`         | `int64`             | MER catalogue `object_id` |
 | `flux`           | `float32`           | `FLUX_VIS_UNIF` from the PHZ catalogue |
-| `sci_subtracted` | `float32 [64, 64]`  | Science stamp minus background (flagged pixels keep their value; see `binary_mask`) |
+| `sci_subtracted` | `float32 [64, 64]`  | Science stamp minus background (flagged pixels keep their real value by default, or are zeroed with `--zero-flagged-pixels`; see `binary_mask`) |
 | `noise_map`      | `float32 [64, 64]`  | RMS stamp |
 | `binary_mask`    | `int32 [64, 64]`    | 1 = valid pixel, 0 = flagged pixel |
 | `psf_stamp`      | `float32 [21, 21]`  | PSF interpolated at the source position, normalised to sum 1 |
@@ -140,6 +140,7 @@ push).
 | Build | `--processes N` | Build workers (default: all cores; `1` = sequential) |
 | | `--no-residual` | Do not add the `psf_residual` column |
 | | `--drop-duplicates` | Enforce at most one row per `obj_id` in the final dataset |
+| | `--zero-flagged-pixels` | Zero out flagged pixels in `sci_subtracted` instead of keeping their real value |
 | | `--reference-psf PATH` | Isotropic reference PSF FITS (default: `src/euclid_vis_isotropic_min_psf.fits`) |
 | Output | `--push` | Push a fresh dataset to the Hub |
 | | `--merge` | Concatenate with the existing Hub dataset, then push |
@@ -213,8 +214,9 @@ Per observation (`process_obs_id`), then per quadrant:
    sources too close to a quadrant edge are skipped. From the same pixel slice:
    subtract the background and build the bad-pixel mask from
    `FLG & FLAG_BITMASK`. Flagged pixels are counted only to drop the stamp when
-   they reach `≥ MAX_BAD_PIXEL_FRACTION` of it; otherwise they keep their real
-   `sci_subtracted` value and are recorded in `binary_mask`.
+   they reach `≥ MAX_BAD_PIXEL_FRACTION` of it; by default they otherwise keep
+   their real `sci_subtracted` value and are recorded in `binary_mask` (see
+   `--zero-flagged-pixels` below for the alternative).
 4. **Interpolate the PSF** — `EuclidPSFModel.interpolate_at(x, y)` at the source
    pixel position gives a normalised 21 × 21 PSF stamp.
 
@@ -222,6 +224,28 @@ Per observation (`process_obs_id`), then per quadrant:
 `Dataset.from_generator`. `iter_records` runs one worker per observation with
 `multiprocessing.Pool.imap_unordered`; pass `processes=1` for a single-process
 run.
+
+#### Flagged pixels: real value vs. zeroed out (`--zero-flagged-pixels`)
+
+Flagged pixels (hot pixels, cosmic rays, saturation — anything caught by
+`FLAG_BITMASK`) are a small minority of a stamp, but their **value** can be
+extreme. By default (`--zero-flagged-pixels` off) `sci_subtracted` keeps
+their real, unmodified value — nothing is thrown away, but a handful of
+outlier pixels can then dominate the value range of the whole stamp (a raw
+`imshow`, `min`/`max`, or any statistic that isn't `binary_mask`-aware will
+be skewed by them), even though a generative model's loss can be told to
+ignore them via `binary_mask` at training time.
+
+With `--zero-flagged-pixels`, those pixels are set to `0.0` directly in
+`sci_subtracted` (matching the exploratory notebook this pipeline was
+originally ported from) — the stamp's value range is no longer skewed by
+defects, at the cost of discarding their real value (which some tasks, e.g.
+inpainting-style training, may actually want).
+
+Neither is strictly better — **it's up to whoever builds the dataset to pick
+based on what will consume it.** `binary_mask` records which pixels were
+flagged either way, so the choice is always recoverable/reproducible from the
+dataset itself.
 
 ### 5. De-duplicate (optional, `--drop-duplicates`)
 
