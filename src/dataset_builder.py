@@ -260,19 +260,41 @@ def build_dataset(obs_ids, quadrants=QUADRANTS, data_dir=DATA_DIR,
     )
 
 
+def drop_duplicate_obj_ids(dataset, verbose=True):
+    """Return ``dataset`` with at most one row per ``obj_id`` (first occurrence wins)."""
+    seen = set()
+    keep = []
+    for i, obj_id in enumerate(dataset["obj_id"]):
+        if obj_id in seen:
+            continue
+        seen.add(obj_id)
+        keep.append(i)
+    if verbose and len(keep) != len(dataset):
+        print(f"[drop-duplicates] removed {len(dataset) - len(keep)} duplicate "
+              f"obj_id row(s); {len(keep)} unique row(s) kept")
+    return dataset.select(keep)
+
+
 def push_dataset(dataset, repo_id=HF_REPO_ID, private=True, token=None):
     """Push to the Hub. Token from ``token`` or the ``HF_TOKEN`` env var."""
     dataset.push_to_hub(repo_id, private=private,
                         token=token or os.environ.get("HF_TOKEN"))
 
 
-def merge_and_push(new_dataset, repo_id=HF_REPO_ID, private=True, token=None):
-    """Concatenate with the existing Hub dataset, then push the union back."""
+def merge_and_push(new_dataset, repo_id=HF_REPO_ID, private=True, token=None,
+                   drop_duplicates=False):
+    """Concatenate with the existing Hub dataset, then push the union back.
+
+    With ``drop_duplicates`` the merged dataset is reduced to one row per
+    ``obj_id``; existing rows come first, so they win over new colliding ones.
+    """
     from datasets import concatenate_datasets, load_dataset
 
     token = token or os.environ.get("HF_TOKEN")
     existing = load_dataset(repo_id, split="train", token=token)
     merged = concatenate_datasets([existing, new_dataset])
+    if drop_duplicates:
+        merged = drop_duplicate_obj_ids(merged)
     push_dataset(merged, repo_id, private, token)
     return merged
 

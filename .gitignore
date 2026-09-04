@@ -1,1 +1,8 @@
 .DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Local Euclid Q1 data store (kept local, not tracked)
+data/Q1_VIS_CALIBRATED_DB/

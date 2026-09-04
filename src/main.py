@@ -5,8 +5,9 @@ Stages, run in order (each can be skipped once done):
   2. acquire   download calibrated frames, backgrounds, PSF model, catalogues
   3. extract   slice per-quadrant FITS (SCI/RMS/FLG, BKG, PSF)
   4. build     cut background-subtracted stamps into a ``datasets.Dataset``
-  5. residual  add the ``psf_residual`` column (optional)
-  6. output    save locally and/or push to the Hugging Face Hub
+  5. dedup     enforce one row per obj_id (optional, --drop-duplicates)
+  6. residual  add the ``psf_residual`` column (optional)
+  7. output    save locally and/or push to the Hugging Face Hub
 
 Hub pushes read the token from ``--hf-token`` or the ``HF_TOKEN`` env var.
 
@@ -36,6 +37,7 @@ from config import DATA_DIR, HF_REPO_ID, QUADRANT_DIR, QUADRANTS  # noqa: E402
 from dataset_builder import (  # noqa: E402
     add_psf_residual,
     build_dataset,
+    drop_duplicate_obj_ids,
     merge_and_push,
     push_dataset,
 )
@@ -119,6 +121,8 @@ def build_parser():
                    help="build workers (default: all cores; 1 = sequential)")
     p.add_argument("--no-residual", action="store_true",
                    help="do not add the psf_residual column")
+    p.add_argument("--drop-duplicates", action="store_true",
+                   help="enforce at most one row per obj_id in the final dataset")
     p.add_argument("--reference-psf", metavar="PATH", default=None,
                    help="isotropic reference PSF FITS "
                         "(default: src/euclid_vis_isotropic_min_psf.fits)")
@@ -169,6 +173,11 @@ def main(argv=None):
     if len(dataset) == 0:
         sys.exit("[build] empty dataset - nothing to output.")
 
+    if args.drop_duplicates:
+        if verbose:
+            print("[drop-duplicates] enforcing unique obj_id ...")
+        dataset = drop_duplicate_obj_ids(dataset, verbose=verbose)
+
     if not args.no_residual:
         if verbose:
             print("[residual] adding psf_residual column ...")
@@ -179,7 +188,8 @@ def main(argv=None):
         if verbose:
             print(f"[output] merging into {args.repo_id} and pushing ...")
         merged = merge_and_push(dataset, repo_id=args.repo_id, private=private,
-                                token=args.hf_token)
+                                token=args.hf_token,
+                                drop_duplicates=args.drop_duplicates)
         if verbose:
             print(f"[output] pushed {len(merged)} row(s) to {args.repo_id}")
     elif args.push:
