@@ -5,9 +5,10 @@ Stages, run in order (each can be skipped once done):
   2. acquire   download calibrated frames, backgrounds, PSF model, catalogues
   3. extract   slice per-quadrant FITS (SCI/RMS/FLG, BKG, PSF)
   4. build     cut background-subtracted stamps into a ``datasets.Dataset``
-  5. dedup     enforce one row per obj_id (optional, --drop-duplicates)
-  6. residual  add the ``psf_residual`` column (optional)
-  7. output    save locally and/or push to the Hugging Face Hub
+  5. filter    drop stamps with no galaxy at the center (optional, --drop-empty-stamps)
+  6. dedup     enforce one row per obj_id (optional, --drop-duplicates)
+  7. residual  add the ``psf_residual`` column (optional)
+  8. output    save locally and/or push to the Hugging Face Hub
                (a push appends a "Build info" block at the end of the Hub
                README -- exact CLI command, columns, obs_ids, row count,
                run parameters -- leaving any existing card text untouched)
@@ -42,6 +43,7 @@ from dataset_builder import (  # noqa: E402
     add_psf_residual,
     build_dataset,
     drop_duplicate_obj_ids,
+    drop_empty_stamps,
     merge_and_push,
     push_dataset,
     update_dataset_card,
@@ -134,6 +136,9 @@ def build_parser():
                    help="do not add the psf_residual column")
     p.add_argument("--drop-duplicates", action="store_true",
                    help="enforce at most one row per obj_id in the final dataset")
+    p.add_argument("--drop-empty-stamps", action="store_true",
+                   help="drop stamps with no significant source at the center "
+                        "(peak central SNR below a threshold; see README)")
     p.add_argument("--zero-flagged-pixels", action="store_true",
                    help="zero out flagged pixels in sci_subtracted instead of keeping "
                         "their real value (see README for the tradeoff)")
@@ -188,6 +193,11 @@ def main(argv=None):
     if len(dataset) == 0:
         sys.exit("[build] empty dataset - nothing to output.")
 
+    if args.drop_empty_stamps:
+        if verbose:
+            print("[drop-empty-stamps] checking central SNR ...")
+        dataset = drop_empty_stamps(dataset, verbose=verbose)
+
     if args.drop_duplicates:
         if verbose:
             print("[drop-duplicates] enforcing unique obj_id ...")
@@ -212,6 +222,7 @@ def main(argv=None):
         "psf_residual": not args.no_residual,
         "reference_psf": args.reference_psf or "default (src/euclid_vis_isotropic_min_psf.fits)",
         "drop_duplicates": args.drop_duplicates,
+        "drop_empty_stamps": args.drop_empty_stamps,
         "zero_flagged_pixels": args.zero_flagged_pixels,
     }
 

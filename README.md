@@ -15,6 +15,7 @@ The pipeline has three parts:
    background-subtracted stamp with its noise and mask, interpolate the PSF at
    the source position, and collect the records into a
    [`datasets.Dataset`](https://huggingface.co/docs/datasets). Optionally
+   filtered down to stamps with a significant source at the center and/or
    de-duplicated down to one row per `obj_id`.
 3. **Output** — save the dataset locally and/or push it to the Hugging Face Hub.
 
@@ -140,6 +141,7 @@ push).
 | Build | `--processes N` | Build workers (default: all cores; `1` = sequential) |
 | | `--no-residual` | Do not add the `psf_residual` column |
 | | `--drop-duplicates` | Enforce at most one row per `obj_id` in the final dataset |
+| | `--drop-empty-stamps` | Drop stamps with no significant source at the center |
 | | `--zero-flagged-pixels` | Zero out flagged pixels in `sci_subtracted` instead of keeping their real value |
 | | `--reference-psf PATH` | Isotropic reference PSF FITS (default: `src/euclid_vis_isotropic_min_psf.fits`) |
 | Output | `--push` | Push a fresh dataset to the Hub |
@@ -246,7 +248,26 @@ based on what will consume it.** `binary_mask` records which pixels were
 flagged either way, so the choice is always recoverable/reproducible from the
 dataset itself.
 
-### 5. De-duplicate (optional, `--drop-duplicates`)
+### 5. Drop empty stamps (optional, `--drop-empty-stamps`)
+
+`drop_empty_stamps(dataset)` drops stamps with no significant source at the
+center — a handful of isolated-but-uninteresting cutouts survive the
+catalogue cuts (e.g. a source detected slightly off-center in a neighbouring
+quadrant) and are of no use to train a generative model on. For each stamp,
+the peak signal-to-noise (`sci_subtracted / noise_map`) is measured in a
+small box (`EMPTY_STAMP_CENTER_FRAC`, default 5% of the stamp side) at the
+center; rows whose peak SNR there is below `EMPTY_STAMP_SNR_THRESHOLD`
+(default 3.5) are dropped:
+
+```
+[drop-empty-stamps] removed 3 stamp(s) with no significant source at center; 197 row(s) kept
+```
+
+Both thresholds live in `src/config.py` and can be tuned to the dataset —
+visually check a sample of the flagged stamps before relying on the default
+values for a production run.
+
+### 6. De-duplicate (optional, `--drop-duplicates`)
 
 `drop_duplicate_obj_ids(dataset)` reduces the dataset to at most one row per
 `obj_id` (first occurrence wins) — useful because a source near a quadrant
@@ -264,7 +285,7 @@ Applied twice when relevant:
   set, on the concatenated dataset — existing Hub rows come first, so they win
   over colliding new ones.
 
-### 6. Residual PSF (optional)
+### 7. Residual PSF (optional)
 
 `add_psf_residual(dataset)` adds a `psf_residual` column. Each `psf_stamp` is
 modelled as `reference_psf (*) kernel`, and the kernel is recovered by dividing
@@ -273,7 +294,7 @@ isotropic 21 × 21 stamp in `src/euclid_vis_isotropic_min_psf.fits`.
 `reconvolve_psf` inverts the operation and is useful to check that a kernel
 round-trips back to its stamp.
 
-### 7. Output
+### 8. Output
 
 * `dataset.save_to_disk(dir)` — local Arrow dataset.
 * `push_dataset(dataset)` — `push_to_hub`, token from `HF_TOKEN`.

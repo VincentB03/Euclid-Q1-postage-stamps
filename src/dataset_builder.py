@@ -29,6 +29,8 @@ from datasets import Array2D, Dataset, Features, Value
 from config import (
     DATA_DIR,
     DISTANCE,
+    EMPTY_STAMP_CENTER_FRAC,
+    EMPTY_STAMP_SNR_THRESHOLD,
     FLAG_BITMASK,
     FLUX_MAX,
     FLUX_MIN,
@@ -340,6 +342,39 @@ def drop_duplicate_obj_ids(dataset, verbose=True):
         else:
             print(f"[drop-duplicates] no duplicate obj_id found; "
                   f"{len(keep)} row(s) kept")
+    return dataset.select(keep)
+
+
+def _central_peak_snr(sci, noise, center_frac):
+    """Peak ``sci / noise`` in a ``center_frac``-sized box at the middle of the stamp."""
+    h, w = sci.shape
+    bh, bw = max(1, int(h * center_frac)), max(1, int(w * center_frac))
+    cy, cx = h // 2, w // 2
+    y0, y1 = cy - bh // 2, cy + bh // 2 + 1
+    x0, x1 = cx - bw // 2, cx + bw // 2 + 1
+    snr = sci[y0:y1, x0:x1] / np.maximum(noise[y0:y1, x0:x1], 1e-12)
+    return snr.max()
+
+
+def drop_empty_stamps(dataset, center_frac=EMPTY_STAMP_CENTER_FRAC,
+                      snr_threshold=EMPTY_STAMP_SNR_THRESHOLD, verbose=True):
+    """Drop stamps with no significant source at the center (no galaxy to model).
+
+    Peak signal-to-noise (``sci_subtracted / noise_map``) is measured in a
+    ``center_frac``-sized box at the middle of the stamp; rows below
+    ``snr_threshold`` there are dropped.
+    """
+    keep = [
+        i for i, (sci, noise) in enumerate(zip(dataset["sci_subtracted"], dataset["noise_map"]))
+        if _central_peak_snr(np.asarray(sci), np.asarray(noise), center_frac) >= snr_threshold
+    ]
+    if verbose:
+        n_removed = len(dataset) - len(keep)
+        if n_removed:
+            print(f"[drop-empty-stamps] removed {n_removed} stamp(s) with no significant "
+                  f"source at center; {len(keep)} row(s) kept")
+        else:
+            print(f"[drop-empty-stamps] no empty stamp found; {len(keep)} row(s) kept")
     return dataset.select(keep)
 
 

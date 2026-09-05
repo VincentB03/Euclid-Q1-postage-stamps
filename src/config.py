@@ -14,8 +14,12 @@ FLUX_MAX = 575.44
 MAX_SPURIOUS_PROB = 0.2
 
 # Stamp quality
-FLAG_BITMASK = 1 | 262144        # VIS FLG bits rejected (bit 0 + bit 18)
-MAX_BAD_PIXEL_FRACTION = 0.10    # drop a stamp at/above this fraction of flagged pixels
+FLAG_BITMASK = 1       # VIS FLG bits rejected ("bad pixels in Euclid Data Product Description")
+MAX_BAD_PIXEL_FRACTION = 0.08    # drop a stamp at/above this fraction of flagged pixels
+
+# Empty-stamp cut (dataset_builder.drop_empty_stamps)
+EMPTY_STAMP_CENTER_FRAC = 0.05    # fraction of the stamp size used as the "central" box
+EMPTY_STAMP_SNR_THRESHOLD = 3.5   # peak SNR in that box below this -> no galaxy at center
 
 # Hugging Face target dataset
 HF_REPO_ID = 'VincentB03/euclid-Q1-V2'
