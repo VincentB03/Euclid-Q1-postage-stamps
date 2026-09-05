@@ -96,8 +96,10 @@ export EUCLID_DATA_DIR=/content/drive/MyDrive/Q1_VIS_CALIBRATED_DB
 | `PIXEL_SIZE` | `0.1` | VIS pixel scale (arcsec/px) |
 | `FLUX_MIN`, `FLUX_MAX` | `0.57544`, `575.44` | `FLUX_VIS_UNIF` window |
 | `MAX_SPURIOUS_PROB` | `0.2` | Max `spurious_prob` kept |
-| `FLAG_BITMASK` | `1 \| 262144` | VIS `FLG` bits treated as bad pixels (bit 0 + bit 18) |
-| `MAX_BAD_PIXEL_FRACTION` | `0.10` | Drop a stamp at/above this fraction of flagged pixels |
+| `FLAG_BITMASK` | `1` | VIS `FLG` bits treated as bad pixels (bit 0) |
+| `MAX_BAD_PIXEL_FRACTION` | `0.08` | Drop a stamp at/above this fraction of flagged pixels |
+| `EMPTY_STAMP_CENTER_FRAC` | `0.05` | Fraction of the stamp side used as the central SNR box |
+| `EMPTY_STAMP_SNR_THRESHOLD` | `3.5` | Peak central SNR below this → no galaxy at center |
 | `HF_REPO_ID` | `VincentB03/euclid-Q1-VF` | Default Hub dataset repo |
 | `QUADRANTS` | 144 entries | `i-j.L` for `i,j ∈ 1..6`, `L ∈ {E,F,G,H}` |
 
