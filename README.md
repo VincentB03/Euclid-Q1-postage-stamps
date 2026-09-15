@@ -182,7 +182,9 @@ observations that tile the Q1 VIS footprint with little overlap.
 | `sync_observation_catalogs` | `catalogue.mer_catalogue` ⋈ `catalogue.phz_photo_z` ⋈ `catalogue.mer_morphology` | `catalogue_obs_<obs_id>.fits` |
 
 Each function checks the data directory first and only downloads what is
-missing. `sync_observation_catalogs` derives the sky footprint of an
+missing. Backgrounds and catalogues are only fetched for observations whose
+science (DET) frame is present on disk, so a failed DET download skips them.
+`sync_observation_catalogs` derives the sky footprint of an
 observation from the WCS of its `*.SCI` extensions, then pulls a cross-matched
 catalogue (photometry, morphology, star/galaxy flags, quality flags) inside
 that RA/Dec box.

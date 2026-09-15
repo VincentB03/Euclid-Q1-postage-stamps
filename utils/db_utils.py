@@ -137,7 +137,12 @@ def sync_calibrated_frames(obs_id_list, data_dir, verbose=True):
             if verbose:
                 print(f"  Downloading: {fname}")
 
-            Euclid.get_product(file_name=fname, output_file=outpath)
+            # get_product logs errors and returns None instead of raising
+            result = Euclid.get_product(file_name=fname, output_file=outpath)
+            if not result or not os.path.exists(outpath):
+                if verbose:
+                    print(f"  ERROR: Download failed for {fname}, skipping obs_id {obs_id}.")
+                continue
             frame_files[obs_id] = outpath
     else:
         if verbose:
@@ -153,6 +158,7 @@ def sync_background_frames(frame_files, obs_id_list, data_dir, verbose=True):
     """
     Locates and downloads the required Euclid VIS background (BKG) FITS files 
     associated with the successfully resolved science (calibrated) frames.
+    A background is only fetched if its science (DET) frame exists on disk.
 
     Args:
         frame_files (dict): Dictionary mapping observation IDs to their local science file paths.
@@ -192,6 +198,13 @@ def sync_background_frames(frame_files, obs_id_list, data_dir, verbose=True):
     # Match background files to their corresponding local science files
     for obs_id, sci_path in frame_files.items():
         sci_filename = os.path.basename(sci_path)
+
+        # Only fetch the background if the science (DET) frame is actually on disk
+        if not os.path.exists(sci_path):
+            if verbose:
+                print(f"  WARNING: Science image not found on disk for obs_id {obs_id} ({sci_filename}). Skipping BKG.")
+            continue
+
         parts = sci_filename.split('-')
         
         # Reconstruct the expected background file pattern from the science filename
