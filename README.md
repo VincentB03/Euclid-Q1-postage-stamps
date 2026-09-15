@@ -360,6 +360,13 @@ row["psf_stamp"]        # 21 x 21
 
 ## Notes and caveats
 
+* **First dither only.** As the code stands, only dither `00-1` of each
+  observation is used: `get_optimal_observation_ids` keeps the first dither
+  when tiling the footprint, and `sync_calibrated_frames` downloads only the
+  `-00-1-` frames (the other dithers are ignored, with a warning if `00-1` is
+  missing for an observation). Backgrounds, quadrant files and stamps all
+  derive from those frames, so the dataset contains no stamps from any other
+  dither.
 * **PSF tile shape.** `EuclidPSFModel` expects each per-quadrant PSF tile to be
   `189 × 189` (a 9 × 9 grid of 21 × 21 stamps). A different layout raises a
   reshape error.
