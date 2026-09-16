@@ -263,6 +263,55 @@ threshold can be applied later with `dataset.filter` without rebuilding.
 `--min-snr X` drops sources with `snr ≤ X` and `--drop-truncated` drops
 truncated ones, at build time, before the stamp is written.
 
+##### Where this definition comes from, and why it may change
+
+The two cuts follow Euclid Collaboration: Csizi et al. 2025, *Euclid
+preparation LXVII. Deep learning true galaxy morphologies for weak lensing
+shear bias calibration*, A&A 695, A283
+([arXiv:2409.07528](https://arxiv.org/abs/2409.07528)), Sect. 4.2:
+
+> Next, we discard galaxies with a low signal-to-noise ratio (S/N ≤ 10), as
+> well as large galaxies that exceed the image size of the postage stamps to
+> avoid truncation. This is done by creating a 3σ binary segmentation map and
+> removing objects whose edges do not lie within the stamp.
+
+The paper gives neither a formula for the S/N nor the details of the
+segmentation. It also applies these cuts to HST COSMOS F814W galaxies drawn on
+64 × 64 stamps at 0.05″/px, not to Euclid VIS single exposures. So only the
+principle (S/N threshold, 3σ segmentation, edge test) comes from the paper.
+The S/N formula, the choice of the central region(s) and
+`SEGMENTATION_CENTER_BOX` were chosen for this pipeline. **This definition is
+provisional and may be replaced by a more relevant one**, for example to match
+a later Euclid reference or the needs of the model trained on the dataset.
+
+Known properties of the current definition, measured on observation `002696`
+(511 stamps, 24 quadrants):
+
+* only pixels above 3σ are summed, so the S/N of faint sources is slightly
+  overestimated (true of any isophotal S/N);
+* summing every region that reaches the central box can add small regions not
+  connected to the galaxy, which can only raise the S/N. With the 5 × 5 box,
+  14 of the 444 sources found by the center pixel get a higher S/N (median
+  +13 %, max +71 %), and 2 of them cross S/N = 10. On pure Gaussian noise the
+  box never gives more than S/N ≈ 5, so it cannot make an empty stamp pass a
+  cut at 10. `truncated` is identical for boxes from 1 × 1 to 7 × 7.
+
+Possible alternatives:
+
+* keep only the region nearest to the center: same S/N as the center pixel
+  whenever it lies in the source, without the box bias above;
+* an "optimal" (matched-filter) S/N, `sqrt(Σ (sci_subtracted / noise_map)²)`,
+  or a fixed aperture;
+* a catalogue S/N (e.g. `flux_segmentation / fluxerr_segmentation`, already
+  downloaded), keeping in mind that it is measured on the stacked MER mosaics
+  and overestimates the S/N of a single exposure.
+
+The code lives in `_segment_source` (`src/dataset_builder.py`) and the
+thresholds in `src/config.py`. The `snr` and `truncated` columns hold values
+computed with the definition in use at build time, so after changing it,
+rebuild the dataset (`--push`) instead of `--merge`-ing new rows into one built
+with the old definition.
+
 #### Flagged pixels: real value vs. zeroed out (`--zero-flagged-pixels`)
 
 Flagged pixels (hot pixels, cosmic rays, saturation — anything caught by
