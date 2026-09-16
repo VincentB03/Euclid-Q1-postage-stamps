@@ -5,6 +5,8 @@ Stages, run in order (each can be skipped once done):
   2. acquire   download calibrated frames, backgrounds, PSF model, catalogues
   3. extract   slice per-quadrant FITS (SCI/RMS/FLG, BKG, PSF)
   4. build     cut background-subtracted stamps into a ``datasets.Dataset``
+               (optionally dropping low-S/N or truncated sources:
+               --min-snr, --drop-truncated)
   5. dedup     enforce one row per obj_id (optional, --drop-duplicates)
   6. residual  add the ``psf_residual`` column (optional)
   7. output    save locally and/or push to the Hugging Face Hub
@@ -137,6 +139,10 @@ def build_parser():
     p.add_argument("--zero-flagged-pixels", action="store_true",
                    help="zero out flagged pixels in sci_subtracted instead of keeping "
                         "their real value (see README for the tradeoff)")
+    p.add_argument("--min-snr", type=float, default=None, metavar="X",
+                   help="drop sources whose stamp S/N (3-sigma segmentation map) is <= X")
+    p.add_argument("--drop-truncated", action="store_true",
+                   help="drop sources whose 3-sigma segmentation map touches the stamp edge")
     p.add_argument("--reference-psf", metavar="PATH", default=None,
                    help="isotropic reference PSF FITS "
                         "(default: src/euclid_vis_isotropic_min_psf.fits)")
@@ -182,7 +188,9 @@ def main(argv=None):
     if verbose:
         print("[build] cutting stamps ...")
     dataset = build_dataset(obs_ids, processes=args.processes,
-                            zero_flagged_pixels=args.zero_flagged_pixels, verbose=verbose)
+                            zero_flagged_pixels=args.zero_flagged_pixels,
+                            min_snr=args.min_snr, drop_truncated=args.drop_truncated,
+                            verbose=verbose)
     if verbose:
         print(f"[build] {len(dataset)} stamp(s)")
     if len(dataset) == 0:
@@ -213,6 +221,8 @@ def main(argv=None):
         "reference_psf": args.reference_psf or "default (src/euclid_vis_isotropic_min_psf.fits)",
         "drop_duplicates": args.drop_duplicates,
         "zero_flagged_pixels": args.zero_flagged_pixels,
+        "min_snr": args.min_snr if args.min_snr is not None else "none",
+        "drop_truncated": args.drop_truncated,
     }
 
     private = not args.public

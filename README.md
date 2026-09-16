@@ -31,6 +31,8 @@ One row per source (`src/dataset_builder.py::HF_FEATURES`):
 | `ra`, `dec`      | `float32`           | Source coordinates (deg, ICRS) |
 | `obj_id`         | `int64`             | MER catalogue `object_id` |
 | `flux`           | `float32`           | `FLUX_VIS_UNIF` from the PHZ catalogue |
+| `snr`            | `float32`           | Isophotal S/N of the source on its 3σ segmentation map (see *S/N and truncation*) |
+| `truncated`      | `bool`              | The source's 3σ segmentation map touches the stamp edge |
 | `sci_subtracted` | `float32 [64, 64]`  | Science stamp minus background (flagged pixels keep their real value by default, or are zeroed with `--zero-flagged-pixels`; see `binary_mask`) |
 | `noise_map`      | `float32 [64, 64]`  | RMS stamp |
 | `binary_mask`    | `int32 [64, 64]`    | 1 = valid pixel, 0 = flagged pixel |
@@ -50,7 +52,7 @@ Stamp size, PSF size and every selection threshold live in `src/config.py`.
   pip install -r requirements.txt
   ```
 
-  (`astroquery`, `astropy`, `numpy`, `pandas`, `datasets`, `huggingface_hub`)
+  (`astroquery`, `astropy`, `numpy`, `pandas`, `datasets`, `huggingface_hub`, `scipy`)
 
 * Anonymous access is enough for Q1 archive queries and downloads. If a product
   requires authentication, log in first in a Python shell:
@@ -97,6 +99,8 @@ export EUCLID_DATA_DIR=/content/drive/MyDrive/Q1_VIS_CALIBRATED_DB
 | `MAX_SPURIOUS_PROB` | `0.2` | Max `spurious_prob` kept |
 | `FLAG_BITMASK` | `1` | VIS `FLG` bits treated as bad pixels (bit 0) |
 | `MAX_BAD_PIXEL_FRACTION` | `0.08` | Drop a stamp at/above this fraction of flagged pixels |
+| `SEGMENTATION_NSIGMA` | `3.0` | Pixel threshold (× `noise_map`) of the source segmentation map |
+| `SEGMENTATION_CENTER_BOX` | `5` | Side (px) of the central box whose segments make up the source |
 | `HF_REPO_ID` | `VincentB03/euclid-Q1-VF` | Default Hub dataset repo |
 | `QUADRANTS` | 144 entries | `i-j.L` for `i,j ∈ 1..6`, `L ∈ {E,F,G,H}` |
 
@@ -141,6 +145,8 @@ push).
 | | `--no-residual` | Do not add the `psf_residual` column |
 | | `--drop-duplicates` | Enforce at most one row per `obj_id` in the final dataset |
 | | `--zero-flagged-pixels` | Zero out flagged pixels in `sci_subtracted` instead of keeping their real value |
+| | `--min-snr X` | Drop sources whose stamp S/N is `≤ X` |
+| | `--drop-truncated` | Drop sources whose 3σ segmentation map touches the stamp edge |
 | | `--reference-psf PATH` | Isotropic reference PSF FITS (default: `src/euclid_vis_isotropic_min_psf.fits`) |
 | Output | `--push` | Push a fresh dataset to the Hub |
 | | `--merge` | Concatenate with the existing Hub dataset, then push |
@@ -219,13 +225,43 @@ Per observation (`process_obs_id`), then per quadrant:
    they reach `≥ MAX_BAD_PIXEL_FRACTION` of it; by default they otherwise keep
    their real `sci_subtracted` value and are recorded in `binary_mask` (see
    `--zero-flagged-pixels` below for the alternative).
-4. **Interpolate the PSF** — `EuclidPSFModel.interpolate_at(x, y)` at the source
+4. **Measure S/N and truncation** (`_segment_source`) — see below; with
+   `--min-snr X` / `--drop-truncated` the source is dropped here.
+5. **Interpolate the PSF** — `EuclidPSFModel.interpolate_at(x, y)` at the source
    pixel position gives a normalised 21 × 21 PSF stamp.
 
 `build_dataset(obs_ids, processes=...)` wraps `iter_records` in
 `Dataset.from_generator`. `iter_records` runs one worker per observation with
 `multiprocessing.Pool.imap_unordered`; pass `processes=1` for a single-process
 run.
+
+#### S/N and truncation (`--min-snr`, `--drop-truncated`)
+
+Every stamp gets a segmentation map of its source:
+
+* pixels with `sci_subtracted > SEGMENTATION_NSIGMA × noise_map` that are not
+  flagged are grouped into 8-connected regions;
+* the source is the union of the regions reaching the central
+  `SEGMENTATION_CENTER_BOX × SEGMENTATION_CENTER_BOX` box. A box rather than
+  the single center pixel keeps sources whose center pixel is flagged (e.g. a
+  saturated core) or one or two pixels off the catalogue position.
+
+From it:
+
+```
+snr       = Σ_seg sci_subtracted / sqrt(Σ_seg noise_map²)
+truncated = the segmentation touches the stamp edge
+```
+
+`snr` is `0` when no region reaches the central box. The stamps come from a
+single, non-resampled exposure, so pixel noise is uncorrelated and `noise_map`
+alone gives the right error — unlike the MER catalogue fluxes, which are
+measured on the stacked mosaics and would overestimate the stamp S/N.
+
+Both values are always stored (`snr`, `truncated` columns), so a different
+threshold can be applied later with `dataset.filter` without rebuilding.
+`--min-snr X` drops sources with `snr ≤ X` and `--drop-truncated` drops
+truncated ones, at build time, before the stamp is written.
 
 #### Flagged pixels: real value vs. zeroed out (`--zero-flagged-pixels`)
 
@@ -281,7 +317,9 @@ round-trips back to its stamp.
 * `push_dataset(dataset)` — `push_to_hub`, token from `HF_TOKEN`.
 * `merge_and_push(dataset, drop_duplicates=...)` — `load_dataset(repo_id)` +
   `concatenate_datasets` + optional dedup + `push_to_hub`, for incrementally
-  growing the Hub dataset across runs.
+  growing the Hub dataset across runs. Both datasets must have the same
+  columns: a Hub dataset built before the `snr` / `truncated` columns existed
+  has to be rebuilt (`--push`) before it can be merged into.
 
 ---
 

@@ -16,6 +16,8 @@ MAX_SPURIOUS_PROB = 0.2
 # Stamp quality
 FLAG_BITMASK = 1       # VIS FLG bits rejected ("bad pixels in Euclid Data Product Description")
 MAX_BAD_PIXEL_FRACTION = 0.08    # drop a stamp at/above this fraction of flagged pixels
+SEGMENTATION_NSIGMA = 3.0        # pixel threshold (x noise_map) of the source segmentation map
+SEGMENTATION_CENTER_BOX = 5      # side (px) of the central box whose segments make up the source
 
 # Hugging Face target dataset
 HF_REPO_ID = 'VincentB03/euclid-Q1-V2'

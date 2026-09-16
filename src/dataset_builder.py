@@ -19,6 +19,7 @@ import warnings
 from datetime import datetime, timezone
 
 import numpy as np
+from scipy import ndimage
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.nddata import Cutout2D
@@ -40,6 +41,8 @@ from config import (
     PSF_SIZE,
     QUADRANT_DIR,
     QUADRANTS,
+    SEGMENTATION_CENTER_BOX,
+    SEGMENTATION_NSIGMA,
     STAMP_SIZE,
 )
 from psf_model import EuclidPSFModel
@@ -55,6 +58,8 @@ HF_FEATURES = Features({
     "dec": Value("float32"),
     "obj_id": Value("int64"),
     "flux": Value("float32"),
+    "snr": Value("float32"),
+    "truncated": Value("bool"),
     "sci_subtracted": Array2D(shape=(STAMP_SIZE, STAMP_SIZE), dtype="float32"),
     "noise_map": Array2D(shape=(STAMP_SIZE, STAMP_SIZE), dtype="float32"),
     "binary_mask": Array2D(shape=(STAMP_SIZE, STAMP_SIZE), dtype="int32"),
@@ -127,8 +132,36 @@ def _resolve_files(obs_id, quadrant, quadrant_dir):
     return sci_path, bkg_files[0], psf_files[0]
 
 
+def _segment_source(sci_sub, rms_stamp, bad_pixels, center, nsigma=SEGMENTATION_NSIGMA,
+                    center_box=SEGMENTATION_CENTER_BOX):
+    """``(snr, truncated)`` of the source at ``center`` from its segmentation map.
+
+    Unflagged pixels above ``nsigma * rms`` are grouped into 8-connected
+    regions; the source is the union of the regions that reach the
+    ``center_box`` x ``center_box`` box around ``center`` ``(row, col)``. A box
+    rather than the single center pixel keeps sources whose center pixel is
+    flagged or slightly offset. ``snr`` is the isophotal S/N,
+    ``sum(signal) / sqrt(sum(rms**2))``, and ``truncated`` tells whether the
+    source touches the stamp edge. No region in the box gives ``(0.0, False)``.
+    """
+    above = (sci_sub > nsigma * rms_stamp) & ~bad_pixels
+    labels, _ = ndimage.label(above, structure=np.ones((3, 3)))
+    row, col = center
+    half = center_box // 2
+    ids = np.unique(labels[row - half:row + half + 1, col - half:col + half + 1])
+    ids = ids[ids > 0]
+    if ids.size == 0:
+        return 0.0, False
+
+    seg = np.isin(labels, ids)
+    snr = sci_sub[seg].sum() / np.sqrt((rms_stamp[seg] ** 2).sum())
+    truncated = bool(seg[0].any() or seg[-1].any() or seg[:, 0].any() or seg[:, -1].any())
+    return float(snr), truncated
+
+
 def _extract_stamp(source, obs_id, quadrant, sci_data, bkg_data, flg_data, rms_data,
-                   wcs, psf_model, stamp_size=STAMP_SIZE, zero_flagged_pixels=False):
+                   wcs, psf_model, stamp_size=STAMP_SIZE, zero_flagged_pixels=False,
+                   min_snr=None, drop_truncated=False):
     """Build one record dict for ``source``, or None if it fails a cut."""
     position = SkyCoord(source['right_ascension'], source['declination'],
                         unit="deg", frame="icrs")
@@ -158,6 +191,14 @@ def _extract_stamp(source, obs_id, quadrant, sci_data, bkg_data, flg_data, rms_d
             sci_sub[bad_pixels] = 0.0
         binary_mask = np.where(bad_pixels, 0, 1).astype(np.int32)
 
+        x_cut, y_cut = cutout.position_cutout
+        snr, truncated = _segment_source(sci_sub, rms_stamp, bad_pixels,
+                                         (int(round(y_cut)), int(round(x_cut))))
+        if min_snr is not None and snr <= min_snr:
+            return None
+        if drop_truncated and truncated:
+            return None
+
         x_pix, y_pix = cutout.position_original
         psf_stamp = psf_model.interpolate_at(float(x_pix), float(y_pix))
 
@@ -168,6 +209,8 @@ def _extract_stamp(source, obs_id, quadrant, sci_data, bkg_data, flg_data, rms_d
             "dec": float(source['declination']),
             "obj_id": int(source['object_id']),
             "flux": float(source['FLUX_VIS_UNIF']),
+            "snr": snr,
+            "truncated": truncated,
             "sci_subtracted": sci_sub,
             "noise_map": rms_stamp,
             "binary_mask": binary_mask,
@@ -178,7 +221,8 @@ def _extract_stamp(source, obs_id, quadrant, sci_data, bkg_data, flg_data, rms_d
 
 
 def _process_quadrant(obs_id, quadrant, sci_path, bkg_path, psf_path, sources,
-                      stamp_size=STAMP_SIZE, psf_size=PSF_SIZE, zero_flagged_pixels=False):
+                      stamp_size=STAMP_SIZE, psf_size=PSF_SIZE, zero_flagged_pixels=False,
+                      min_snr=None, drop_truncated=False):
     """Records for every source in ``sources`` that fits inside this quadrant."""
     with fits.open(psf_path) as hdul_psf:
         psf_raw = next(ext.data for ext in hdul_psf
@@ -199,7 +243,8 @@ def _process_quadrant(obs_id, quadrant, sci_path, bkg_path, psf_path, sources,
             for source in sources:
                 record = _extract_stamp(source, obs_id, quadrant, sci_data, bkg_data,
                                         flg_data, rms_data, wcs, psf_model, stamp_size,
-                                        zero_flagged_pixels=zero_flagged_pixels)
+                                        zero_flagged_pixels=zero_flagged_pixels,
+                                        min_snr=min_snr, drop_truncated=drop_truncated)
                 if record is not None:
                     records.append(record)
     return records
@@ -209,7 +254,8 @@ def _process_quadrant(obs_id, quadrant, sci_path, bkg_path, psf_path, sources,
 # Per-observation worker + record generators
 # ---------------------------------------------------------------------------
 def process_obs_id(obs_id, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR, quadrants=QUADRANTS,
-                   zero_flagged_pixels=False, verbose=False):
+                   zero_flagged_pixels=False, min_snr=None, drop_truncated=False,
+                   verbose=False):
     """Every stamp record for one observation (one parallel work unit)."""
     cat_path = catalogue_path(obs_id, data_dir)
     if not os.path.exists(cat_path):
@@ -239,7 +285,8 @@ def process_obs_id(obs_id, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR, quadran
             continue
         sci_path, bkg_path, psf_path = resolved
         new_records = _process_quadrant(obs_id, quadrant, sci_path, bkg_path, psf_path, sources,
-                                        zero_flagged_pixels=zero_flagged_pixels)
+                                        zero_flagged_pixels=zero_flagged_pixels,
+                                        min_snr=min_snr, drop_truncated=drop_truncated)
         records.extend(new_records)
         if verbose:
             print(f"   [obs {obs_id}] quadrant {i}/{n_quadrants} ({quadrant}): "
@@ -252,7 +299,7 @@ def process_obs_id(obs_id, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR, quadran
 
 def iter_records(obs_ids, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR,
                  quadrants=QUADRANTS, processes=None, zero_flagged_pixels=False,
-                 verbose=False):
+                 min_snr=None, drop_truncated=False, verbose=False):
     """Yield one record dict per stamp, one observation per worker.
 
     ``processes=1`` runs sequentially (handy for debugging); otherwise an
@@ -261,7 +308,8 @@ def iter_records(obs_ids, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR,
     obs_ids = list(obs_ids)
     worker = functools.partial(process_obs_id, data_dir=data_dir,
                                quadrant_dir=quadrant_dir, quadrants=list(quadrants),
-                               zero_flagged_pixels=zero_flagged_pixels, verbose=verbose)
+                               zero_flagged_pixels=zero_flagged_pixels, min_snr=min_snr,
+                               drop_truncated=drop_truncated, verbose=verbose)
 
     if processes == 1:
         for j, obs_id in enumerate(obs_ids, start=1):
@@ -286,7 +334,7 @@ def iter_records(obs_ids, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR,
 # ---------------------------------------------------------------------------
 def build_dataset(obs_ids, quadrants=QUADRANTS, data_dir=DATA_DIR,
                   quadrant_dir=QUADRANT_DIR, processes=None, zero_flagged_pixels=False,
-                  verbose=False):
+                  min_snr=None, drop_truncated=False, verbose=False):
     """Materialise the postage-stamp dataset from the record generator.
 
     ``zero_flagged_pixels`` controls what ``sci_subtracted`` holds at pixels
@@ -307,6 +355,11 @@ def build_dataset(obs_ids, quadrants=QUADRANTS, data_dir=DATA_DIR,
     that isn't skewed by defects; keeping it preserves information but
     requires consistently applying ``binary_mask`` downstream. Pick based on
     what consumes the dataset.
+
+    Every row stores the ``snr`` and ``truncated`` of its source, measured on
+    a ``SEGMENTATION_NSIGMA`` segmentation map (see ``_segment_source``).
+    ``min_snr`` drops sources with ``snr <= min_snr``; ``drop_truncated`` drops
+    sources whose segmentation touches the stamp edge.
     """
     return Dataset.from_generator(
         iter_records,
@@ -318,6 +371,8 @@ def build_dataset(obs_ids, quadrants=QUADRANTS, data_dir=DATA_DIR,
             "quadrants": tuple(quadrants),
             "processes": processes,
             "zero_flagged_pixels": zero_flagged_pixels,
+            "min_snr": min_snr,
+            "drop_truncated": drop_truncated,
             "verbose": verbose,
         },
     )
