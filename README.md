@@ -284,28 +284,6 @@ The S/N formula, the choice of the central region(s) and
 provisional and may be replaced by a more relevant one**, for example to match
 a later Euclid reference or the needs of the model trained on the dataset.
 
-Known properties of the current definition, measured on observation `002696`
-(511 stamps, 24 quadrants):
-
-* only pixels above 3σ are summed, so the S/N of faint sources is slightly
-  overestimated (true of any isophotal S/N);
-* summing every region that reaches the central box can add small regions not
-  connected to the galaxy, which can only raise the S/N. With the 5 × 5 box,
-  14 of the 444 sources found by the center pixel get a higher S/N (median
-  +13 %, max +71 %), and 2 of them cross S/N = 10. On pure Gaussian noise the
-  box never gives more than S/N ≈ 5, so it cannot make an empty stamp pass a
-  cut at 10. `truncated` is identical for boxes from 1 × 1 to 7 × 7.
-
-Possible alternatives:
-
-* keep only the region nearest to the center: same S/N as the center pixel
-  whenever it lies in the source, without the box bias above;
-* an "optimal" (matched-filter) S/N, `sqrt(Σ (sci_subtracted / noise_map)²)`,
-  or a fixed aperture;
-* a catalogue S/N (e.g. `flux_segmentation / fluxerr_segmentation`, already
-  downloaded), keeping in mind that it is measured on the stacked MER mosaics
-  and overestimates the S/N of a single exposure.
-
 The code lives in `_segment_source` (`src/dataset_builder.py`) and the
 thresholds in `src/config.py`. The `snr` and `truncated` columns hold values
 computed with the definition in use at build time, so after changing it,
