@@ -160,6 +160,21 @@ push).
 > start method) any script that calls into the build must guard its entry point
 > with `if __name__ == "__main__":` — `src/main.py` already does.
 
+### Running on Google Colab
+
+When the data already lives on Google Drive (`MyDrive/Q1_VIS_CALIBRATED_DB`),
+**the whole pipeline can run on Colab**, and it is the faster option: Colab
+reads the Drive from Google's own network, whereas a local machine accessing
+the Drive (e.g. through Google Drive for desktop) has to transfer every FITS
+file over its own connection.
+
+`notebooks/build_stamps64_from_drive.ipynb` does this end to end: it mounts
+the Drive, keeps the observations whose DET + BKG + catalogue are there
+(downloading missing catalogues), slices the quadrants on the Drive, then
+builds and pushes the dataset to the Hub in batches. Re-running all the cells
+after a disconnection resumes where it stopped. The Hugging Face token is read
+from the Colab secret `HF_TOKEN`.
+
 ---
 
 ## How the pipeline works
@@ -361,6 +376,8 @@ src/
 └── euclid_vis_isotropic_min_psf.fits   21×21 isotropic reference PSF
 utils/
 └── db_utils.py            Euclid archive queries, downloads, quadrant slicing
+notebooks/
+└── build_stamps64_from_drive.ipynb   Colab: slice, build and push from the Drive data
 requirements.txt
 ```
 
