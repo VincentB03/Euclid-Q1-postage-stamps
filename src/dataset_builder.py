@@ -114,7 +114,9 @@ def apply_isolation_cut(sources, catalogue, distance=DISTANCE, pixel_size=PIXEL_
 def _resolve_files(obs_id, quadrant, quadrant_dir):
     """``(sci_path, bkg_path, psf_path)`` for one obs_id/quadrant, or None."""
     q_str = quadrant.replace(".", "-")
-    sci_files = glob.glob(os.path.join(quadrant_dir, f'*DET*{obs_id}*_{q_str}.fits'))
+    # Zero-padded and dash-delimited: a bare obs_id also matches digits of
+    # another frame's timestamp (e.g. 2682 in '...T045100.762682Z').
+    sci_files = glob.glob(os.path.join(quadrant_dir, f'*-DET-{str(obs_id).zfill(6)}-*_{q_str}.fits'))
     if not sci_files:
         return None
 
