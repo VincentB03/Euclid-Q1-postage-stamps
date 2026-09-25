@@ -1,20 +1,9 @@
-"""End-to-end orchestrator for the Euclid Q1 VIS postage-stamp database.
+"""Euclid Q1 VIS postage-stamp pipeline.
 
-Stages, run in order (each can be skipped once done):
-  1. obs       resolve the list of observation IDs
-  2. acquire   download calibrated frames, backgrounds, PSF model, catalogues
-  3. extract   slice per-quadrant FITS (SCI/RMS/FLG, BKG, PSF)
-  4. build     cut background-subtracted stamps into a ``datasets.Dataset``
-               (optionally dropping low-S/N or truncated sources:
-               --min-snr, --drop-truncated)
-  5. dedup     enforce one row per obj_id (optional, --drop-duplicates)
-  6. residual  add the ``psf_residual`` column (optional)
-  7. output    save locally and/or push to the Hugging Face Hub
-               (a push appends a "Build info" block at the end of the Hub
-               README -- exact CLI command, columns, obs_ids, row count,
-               run parameters -- leaving any existing card text untouched)
-
-Hub pushes read the token from ``--hf-token`` or the ``HF_TOKEN`` env var.
+Stages: acquire (download frames, backgrounds, PSF model, catalogues) ->
+extract (slice per-quadrant FITS) -> build (cut stamps) -> output (save
+locally, or push to the Hugging Face Hub with --push / --merge; the token
+comes from --hf-token or HF_TOKEN).
 
 Examples
 --------
@@ -92,12 +81,8 @@ def acquire(obs_ids, verbose=True):
 
 
 def extract(obs_ids, verbose=True):
-    """Slice the downloaded full-frame FITS into per-quadrant files.
-
-    Only frames matching ``obs_ids`` are scanned/extracted; the PSF model is
-    global and always processed in full.
-    """
-    psf_path = sync_psf_model(DATA_DIR, verbose=verbose)  # idempotent: locate on disk
+    """Slice the frames of ``obs_ids`` and the global PSF model into per-quadrant files."""
+    psf_path = sync_psf_model(DATA_DIR, verbose=verbose)  # already on disk: just locates it
     extract_quadrants_from_frames(DATA_DIR, QUADRANT_DIR, QUADRANTS, obs_ids=obs_ids,
                                   verbose=verbose)
     extract_quadrants_from_backgrounds(DATA_DIR, QUADRANT_DIR, QUADRANTS, obs_ids=obs_ids,

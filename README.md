@@ -1,456 +1,168 @@
 # Euclid Q1 VIS postage stamps
 
-A pipeline that turns Euclid Q1 VIS calibrated imaging into a machine-learning
-ready dataset of **64 × 64 postage stamps** of isolated sources, each paired with
-its noise map, a bad-pixel mask, and a locally interpolated PSF (optionally plus
-a residual PSF kernel).
+Builds a machine-learning dataset of **64 × 64 postage stamps** of isolated
+galaxies from Euclid Q1 VIS calibrated exposures. Each stamp comes with its
+noise map, bad-pixel mask and the PSF interpolated at the source position. The
+result is a Hugging Face [`datasets.Dataset`](https://huggingface.co/docs/datasets),
+saved locally or pushed to the Hub.
 
-The pipeline has three parts:
+Pipeline: **acquire** (Euclid archive downloads) → **extract** (per-quadrant
+FITS) → **build** (stamps) → **output** (disk or Hub).
 
-1. **Acquisition** — query the Euclid Science Archive, download the calibrated
-   science frames, their background frames, the global VIS PSF model and the
-   cross-matched source catalogues, then slice everything into per-quadrant FITS
-   files.
-2. **Build** — for every selected, isolated catalogue source, cut a
-   background-subtracted stamp with its noise and mask, interpolate the PSF at
-   the source position, and collect the records into a
-   [`datasets.Dataset`](https://huggingface.co/docs/datasets). Optionally
-   de-duplicated down to one row per `obj_id`.
-3. **Output** — save the dataset locally and/or push it to the Hugging Face Hub.
+## Dataset
 
----
+One row per source:
 
-## Dataset schema
+| Field | Type | Description |
+|---|---|---|
+| `obs_id`, `quadrant` | `string` | Euclid observation ID, VIS quadrant (e.g. `3-4.E`) |
+| `ra`, `dec` | `float32` | Source position (deg, ICRS) |
+| `obj_id` | `int64` | MER catalogue `object_id` |
+| `flux` | `float32` | `FLUX_VIS_UNIF` from the PHZ catalogue |
+| `snr` | `float32` | Isophotal S/N on the 3σ segmentation map ([see below](#sn-and-truncation)) |
+| `truncated` | `bool` | Segmentation map touches the stamp edge |
+| `sci_subtracted` | `float32 [64, 64]` | Science − background |
+| `noise_map` | `float32 [64, 64]` | RMS |
+| `binary_mask` | `int32 [64, 64]` | 1 = valid pixel, 0 = flagged pixel |
+| `psf_stamp` | `float32 [21, 21]` | PSF at the source position, normalised to sum 1 |
+| `psf_residual` | `float32 [21, 21]` | *(optional)* kernel `k` such that `reference_psf ⊛ k = psf_stamp` |
 
-One row per source (`src/dataset_builder.py::HF_FEATURES`):
-
-| Field            | Type                | Description |
-|------------------|---------------------|-------------|
-| `obs_id`         | `string`            | Euclid observation ID |
-| `quadrant`       | `string`            | VIS quadrant, e.g. `3-4.E` |
-| `ra`, `dec`      | `float32`           | Source coordinates (deg, ICRS) |
-| `obj_id`         | `int64`             | MER catalogue `object_id` |
-| `flux`           | `float32`           | `FLUX_VIS_UNIF` from the PHZ catalogue |
-| `snr`            | `float32`           | Isophotal S/N of the source on its 3σ segmentation map (see *S/N and truncation*) |
-| `truncated`      | `bool`              | The source's 3σ segmentation map touches the stamp edge |
-| `sci_subtracted` | `float32 [64, 64]`  | Science stamp minus background (flagged pixels keep their real value by default, or are zeroed with `--zero-flagged-pixels`; see `binary_mask`) |
-| `noise_map`      | `float32 [64, 64]`  | RMS stamp |
-| `binary_mask`    | `int32 [64, 64]`    | 1 = valid pixel, 0 = flagged pixel |
-| `psf_stamp`      | `float32 [21, 21]`  | PSF interpolated at the source position, normalised to sum 1 |
-| `psf_residual`   | `float32 [21, 21]`  | *(optional)* kernel `k` such that `reference_psf (*) k = psf_stamp` |
-
-Stamp size, PSF size and every selection threshold live in `src/config.py`.
-
----
-
-## Requirements
-
-* Python 3.9+
-* Packages in `requirements.txt`:
-
-  ```bash
-  pip install -r requirements.txt
-  ```
-
-  (`astroquery`, `astropy`, `numpy`, `pandas`, `datasets`, `huggingface_hub`, `scipy`)
-
-* Anonymous access is enough for Q1 archive queries and downloads. If a product
-  requires authentication, log in first in a Python shell:
-
-  ```python
-  from astroquery.esa.euclid import Euclid
-  Euclid.login()  # prompts for your Euclid SAS credentials
-  ```
-
-* Pushing to the Hub needs a token, via `--hf-token` or the `HF_TOKEN`
-  environment variable (or `huggingface-cli login`).
-
----
-
-## Configuration
-
-### Data directory
-
-All products are read from / written to a single directory, resolved in this
-order:
-
-1. the `EUCLID_DATA_DIR` environment variable (any path — a Google Drive mount
-   or a plain local folder);
-2. otherwise `/content/drive/MyDrive/Q1_VIS_CALIBRATED_DB` when a Colab Drive
-   mount is detected;
-3. otherwise `<repo>/data/Q1_VIS_CALIBRATED_DB`.
-
-```bash
-export EUCLID_DATA_DIR=/data/euclid/q1        # local run
-# or, on Colab
-export EUCLID_DATA_DIR=/content/drive/MyDrive/Q1_VIS_CALIBRATED_DB
+```python
+from datasets import load_dataset, load_from_disk
+ds = load_from_disk("<DATA_DIR>/dataset")        # local build
+ds = load_dataset("<repo_id>", split="train")    # from the Hub
 ```
 
-### Key constants (`src/config.py`)
+## Installation
 
-| Constant | Default | Meaning |
-|---|---|---|
-| `STAMP_SIZE` | `64` | Science / noise / mask stamp side (px) |
-| `PSF_SIZE` | `21` | PSF stamp side (px) |
-| `POINT_PROB` | `0.5` | Max `point_like_prob` kept (more point-like → dropped) |
-| `DISTANCE` | `46` | Stamp "diagonal" used by the isolation cut (px) |
-| `PIXEL_SIZE` | `0.1` | VIS pixel scale (arcsec/px) |
-| `FLUX_MIN`, `FLUX_MAX` | `0.57544`, `575.44` | `FLUX_VIS_UNIF` window |
-| `MAX_SPURIOUS_PROB` | `0.2` | Max `spurious_prob` kept |
-| `FLAG_BITMASK` | `1` | VIS `FLG` bits treated as bad pixels (bit 0) |
-| `MAX_BAD_PIXEL_FRACTION` | `0.08` | Drop a stamp at/above this fraction of flagged pixels |
-| `SEGMENTATION_NSIGMA` | `3.0` | Pixel threshold (× `noise_map`) of the source segmentation map |
-| `SEGMENTATION_CENTER_BOX` | `5` | Side (px) of the central box whose segments make up the source |
-| `HF_REPO_ID` | `VincentB03/euclid-Q1-VF` | Default Hub dataset repo |
-| `QUADRANTS` | 144 entries | `i-j.L` for `i,j ∈ 1..6`, `L ∈ {E,F,G,H}` |
-
----
-
-## Quick start
-
-Run the whole pipeline through the orchestrator:
+Python ≥ 3.9:
 
 ```bash
-# Full run on the first 17 "optimal" observations, 4 build workers, save locally
+pip install -r requirements.txt
+```
+
+- **Data directory**: all files are read from and written to `$EUCLID_DATA_DIR`.
+  If it is unset: `/content/drive/MyDrive/Q1_VIS_CALIBRATED_DB` on Colab,
+  otherwise `data/Q1_VIS_CALIBRATED_DB/` in the repository.
+- **Euclid archive**: anonymous access is enough for Q1. If a product needs
+  authentication, call `Euclid.login()` (`astroquery.esa.euclid`) first.
+- **Hugging Face**: pushing needs a write token (`--hf-token`, `HF_TOKEN` or
+  `huggingface-cli login`).
+
+## Usage
+
+```bash
+# Full run on the first 17 observations, 4 workers, saved to <DATA_DIR>/dataset
 python src/main.py --limit 17 --processes 4
 
-# Data already downloaded & sliced: only (re)build and push a fresh dataset
+# Data already downloaded and sliced: build and push a new Hub dataset
 python src/main.py --limit 17 --skip-acquire --skip-extract --push
 
-# Append newly built stamps to the existing Hub dataset
-python src/main.py --obs-ids 2698 2699 --skip-acquire --skip-extract --merge
-
-# Same, but drop duplicate obj_id rows within the new batch and against the
-# existing Hub dataset (existing rows win over colliding new ones)
-python src/main.py --obs-ids 2698 2699 --skip-acquire --skip-extract \
-  --merge --drop-duplicates
+# Append new observations to the existing Hub dataset, one row per obj_id
+python src/main.py --obs-ids 2698 2699 --skip-acquire --skip-extract --merge --drop-duplicates
 ```
 
-By default nothing is uploaded: the dataset is written to
-`<DATA_DIR>/dataset` with `datasets.save_to_disk`. Uploading happens only with
-`--push` (fresh) or `--merge` (concatenate with the existing Hub dataset, then
-push).
+Nothing is uploaded without `--push` or `--merge`. Each push also writes a
+*Build info* block (command, parameters, observation IDs) at the end of the Hub
+dataset card, leaving the rest of the card as is.
 
-### `src/main.py` options
+| Option | Effect |
+|---|---|
+| `--obs-ids ID ...`, `--obs-ids-file PATH`, `--limit N` | Observations to process (default: all optimal ones) |
+| `--skip-acquire`, `--skip-extract`, `--skip-build` | Skip a stage |
+| `--processes N` | Build workers (default: all cores; `1` = sequential) |
+| `--min-snr X` | Drop sources with `snr ≤ X` |
+| `--drop-truncated` | Drop truncated sources |
+| `--zero-flagged-pixels` | Set flagged pixels of `sci_subtracted` to 0 ([see below](#flagged-pixels)) |
+| `--drop-duplicates` | One row per `obj_id`; with `--merge`, existing Hub rows win |
+| `--no-residual` | Do not add the `psf_residual` column |
+| `--reference-psf PATH` | Reference PSF (default: `src/euclid_vis_isotropic_min_psf.fits`) |
+| `--push` / `--merge` | Push a new dataset / append to the existing Hub dataset |
+| `--repo-id ID`, `--public`, `--hf-token TOKEN` | Hub target (private by default) |
+| `--save-to DIR` | Local output (default when not pushing: `<DATA_DIR>/dataset`) |
+| `--quiet` | Less logging |
 
-| Group | Option | Effect |
-|---|---|---|
-| Observations | `--obs-ids ID [ID ...]` | Process exactly these observation IDs |
-| | `--obs-ids-file PATH` | One observation ID per line |
-| | `--limit N` | Keep the first `N` optimal observations |
-| Stages | `--skip-acquire` | Frames / backgrounds / PSF / catalogues already downloaded |
-| | `--skip-extract` | Per-quadrant FITS already sliced |
-| | `--skip-build` | Stop after acquisition + extraction |
-| Build | `--processes N` | Build workers (default: all cores; `1` = sequential) |
-| | `--no-residual` | Do not add the `psf_residual` column |
-| | `--drop-duplicates` | Enforce at most one row per `obj_id` in the final dataset |
-| | `--zero-flagged-pixels` | Zero out flagged pixels in `sci_subtracted` instead of keeping their real value |
-| | `--min-snr X` | Drop sources whose stamp S/N is `≤ X` |
-| | `--drop-truncated` | Drop sources whose 3σ segmentation map touches the stamp edge |
-| | `--reference-psf PATH` | Isotropic reference PSF FITS (default: `src/euclid_vis_isotropic_min_psf.fits`) |
-| Output | `--push` | Push a fresh dataset to the Hub |
-| | `--merge` | Concatenate with the existing Hub dataset, then push |
-| | `--save-to DIR` | `save_to_disk` target (default when not pushing: `<DATA_DIR>/dataset`) |
-| | `--repo-id ID` | Hub dataset repo id |
-| | `--public` | Push as a public dataset (default: private) |
-| | `--hf-token TOKEN` | Overrides `HF_TOKEN` |
-| | `--quiet` | Less logging |
+## How it works
 
-> `src/main.py` uses `multiprocessing` in the build stage. On macOS (spawn
-> start method) any script that calls into the build must guard its entry point
-> with `if __name__ == "__main__":` — `src/main.py` already does.
+1. **Observations**: one per sky tile, i.e. the first dither (`00-1`) of each
+   VIS observation in `q1.calibrated_frame`, de-duplicated on RA/Dec rounded
+   to 0.1°.
+2. **Acquire**: download the science (DET) and background (BKG) frames, the
+   global PSF model and a MER ⋈ PHZ ⋈ morphology catalogue covering each
+   observation. Files already on disk are not downloaded again; BKG frames and
+   catalogues are only fetched when the DET frame is present.
+3. **Extract**: slice each frame into its 144 quadrants (6 × 6 CCDs × 4) under
+   `quadrant-data/`.
+4. **Select**: keep sources with `point_like_prob ≤ 0.5`,
+   `0.575 ≤ FLUX_VIS_UNIF ≤ 575.4` µJy (VIS 24.5 to 17 AB mag),
+   `spurious_prob ≤ 0.2`, `det_quality_flag == 0`, `deblended_flag == 0`, and
+   no catalogue neighbour within `(46 + a // 2) × 0.1″`, `a` being the
+   neighbour's `semimajor_axis`.
+5. **Cut**: 64 × 64 cutout (sources too close to a quadrant edge are skipped),
+   background subtracted, dropped if ≥ 8 % of its pixels are flagged
+   (`FLG & FLAG_BITMASK`). The PSF is bilinearly interpolated on the
+   quadrant's 9 × 9 PSF grid.
+6. **Post-process** (optional): de-duplicate `obj_id` (a source can appear in
+   several quadrants or observations); add `psf_residual` by dividing
+   `psf_stamp` by the isotropic reference PSF in Fourier space.
 
-### Running on Google Colab
+All thresholds are in [`src/config.py`](src/config.py).
 
-When the data already lives on Google Drive (`MyDrive/Q1_VIS_CALIBRATED_DB`),
-**the whole pipeline can run on Colab**, and it is the faster option: Colab
-reads the Drive from Google's own network, whereas a local machine accessing
-the Drive (e.g. through Google Drive for desktop) has to transfer every FITS
-file over its own connection.
+### S/N and truncation
 
-`notebooks/build_stamps64_from_drive.ipynb` does this end to end: it mounts
-the Drive, keeps the observations whose DET + BKG + catalogue are there
-(downloading missing catalogues), slices the quadrants on the Drive, then
-builds and pushes the dataset to the Hub in batches. Re-running all the cells
-after a disconnection resumes where it stopped. The Hugging Face token is read
-from the Colab secret `HF_TOKEN`.
-
----
-
-## How the pipeline works
-
-### 1. Resolve observation IDs
-
-`get_optimal_observation_ids()` runs
-
-```sql
-SELECT DISTINCT observation_id, ra, dec
-FROM q1.calibrated_frame
-WHERE instrument_name = 'VIS'
-```
-
-keeps the first dither of each observation, rounds `ra`/`dec` (1 decimal by
-default) and de-duplicates spatially, so the result is a minimal set of
-observations that tile the Q1 VIS footprint with little overlap.
-
-### 2. Acquire
-
-| Function | Archive source | Output |
-|---|---|---|
-| `sync_calibrated_frames` | `q1.calibrated_frame`, VIS, dither `00-1` | `EUC_VIS_SWL-DET-*.fits` |
-| `sync_background_frames` | `q1.aux_calibrated`, `stype='BKG'` | `EUC_VIS_SWL-BKG-*.fits` |
-| `sync_psf_model` | `q1.aux_calibrated`, `stype='PSF MODEL'` | `EUC_VIS_GRD-PSF-*.fits` |
-| `sync_observation_catalogs` | `catalogue.mer_catalogue` ⋈ `catalogue.phz_photo_z` ⋈ `catalogue.mer_morphology` | `catalogue_obs_<obs_id>.fits` |
-
-Each function checks the data directory first and only downloads what is
-missing. Backgrounds and catalogues are only fetched for observations whose
-science (DET) frame is present on disk, so a failed DET download skips them.
-`sync_observation_catalogs` derives the sky footprint of an
-observation from the WCS of its `*.SCI` extensions, then pulls a cross-matched
-catalogue (photometry, morphology, star/galaxy flags, quality flags) inside
-that RA/Dec box.
-
-### 3. Extract quadrants
-
-The VIS focal plane is 6 × 6 CCDs, each split into 4 quadrants (E/F/G/H) — 144
-quadrants of roughly 2048 × 2066 px. The `extract_quadrants_from_*` functions
-split each full-frame FITS into standalone per-quadrant files under
-`quadrant-data/`:
-
-* science → primary header + `{q}.SCI` + `{q}.RMS` + `{q}.FLG`
-* background → primary header + `{q}`
-* PSF model → primary header + `{q}` (saved as `PSF_{q}.fits`)
-
-### 4. Build stamps
-
-Per observation (`process_obs_id`), then per quadrant:
-
-1. **Select sources** (`select_sources`) — keep catalogue rows with
-   `point_like_prob ≤ POINT_PROB`, `FLUX_MIN ≤ FLUX_VIS_UNIF ≤ FLUX_MAX`,
-   `det_quality_flag == 0`, `deblended_flag == 0`,
-   `spurious_prob ≤ MAX_SPURIOUS_PROB`.
-2. **Isolation cut** (`apply_isolation_cut`) — using
-   `match_to_catalog_sky(nthneighbor=2)` against the *full* catalogue, keep only
-   sources whose nearest neighbour is farther than
-   `(DISTANCE + neighbour_semimajor_axis // 2) × PIXEL_SIZE` arcsec.
-3. **Cut the stamp** (`_extract_stamp`) — `Cutout2D(..., mode='strict')`, so
-   sources too close to a quadrant edge are skipped. From the same pixel slice:
-   subtract the background and build the bad-pixel mask from
-   `FLG & FLAG_BITMASK`. Flagged pixels are counted only to drop the stamp when
-   they reach `≥ MAX_BAD_PIXEL_FRACTION` of it; by default they otherwise keep
-   their real `sci_subtracted` value and are recorded in `binary_mask` (see
-   `--zero-flagged-pixels` below for the alternative).
-4. **Measure S/N and truncation** (`_segment_source`) — see below; with
-   `--min-snr X` / `--drop-truncated` the source is dropped here.
-5. **Interpolate the PSF** — `EuclidPSFModel.interpolate_at(x, y)` at the source
-   pixel position gives a normalised 21 × 21 PSF stamp.
-
-`build_dataset(obs_ids, processes=...)` wraps `iter_records` in
-`Dataset.from_generator`. `iter_records` runs one worker per observation with
-`multiprocessing.Pool.imap_unordered`; pass `processes=1` for a single-process
-run.
-
-#### S/N and truncation (`--min-snr`, `--drop-truncated`)
-
-Every stamp gets a segmentation map of its source:
-
-* pixels with `sci_subtracted > SEGMENTATION_NSIGMA × noise_map` that are not
-  flagged are grouped into 8-connected regions;
-* the source is the union of the regions reaching the central
-  `SEGMENTATION_CENTER_BOX × SEGMENTATION_CENTER_BOX` box. A box rather than
-  the single center pixel keeps sources whose center pixel is flagged (e.g. a
-  saturated core) or one or two pixels off the catalogue position.
-
-From it:
+Unflagged pixels above `3 × noise_map` are grouped into 8-connected regions.
+The source is the union of the regions that reach the central 5 × 5 px box
+(which tolerates a flagged or slightly offset centre). Then:
 
 ```
-snr       = Σ_seg sci_subtracted / sqrt(Σ_seg noise_map²)
-truncated = the segmentation touches the stamp edge
+snr       = Σ sci_subtracted / sqrt(Σ noise_map²)   over the source pixels
+truncated = the source touches the stamp edge
 ```
 
-`snr` is `0` when no region reaches the central box. The stamps come from a
-single, non-resampled exposure, so pixel noise is uncorrelated and `noise_map`
-alone gives the right error — unlike the MER catalogue fluxes, which are
-measured on the stacked mosaics and would overestimate the stamp S/N.
+`snr = 0` when no region reaches the box. The stamps come from single,
+non-resampled exposures, so pixel noise is uncorrelated and `noise_map` alone
+gives the right error.
 
-Both values are always stored (`snr`, `truncated` columns), so a different
-threshold can be applied later with `dataset.filter` without rebuilding.
-`--min-snr X` drops sources with `snr ≤ X` and `--drop-truncated` drops
-truncated ones, at build time, before the stamp is written.
+Both columns are always stored, so other cuts can be applied later with
+`dataset.filter`. The principle (S/N ≤ 10 cut, 3σ segmentation map, edge test)
+follows [Csizi et al. 2025, A&A 695, A283](https://arxiv.org/abs/2409.07528),
+Sect. 4.2; the exact formula and the central box are choices of this pipeline.
+**This definition is provisional.** After changing it, rebuild the dataset
+(`--push`) instead of `--merge`-ing into one built with the old definition.
 
-##### Where this definition comes from, and why it may change
+### Flagged pixels
 
-The two cuts follow Euclid Collaboration: Csizi et al. 2025, *Euclid
-preparation LXVII. Deep learning true galaxy morphologies for weak lensing
-shear bias calibration*, A&A 695, A283
-([arXiv:2409.07528](https://arxiv.org/abs/2409.07528)), Sect. 4.2:
-
-> Next, we discard galaxies with a low signal-to-noise ratio (S/N ≤ 10), as
-> well as large galaxies that exceed the image size of the postage stamps to
-> avoid truncation. This is done by creating a 3σ binary segmentation map and
-> removing objects whose edges do not lie within the stamp.
-
-The paper gives neither a formula for the S/N nor the details of the
-segmentation. It also applies these cuts to HST COSMOS F814W galaxies drawn on
-64 × 64 stamps at 0.05″/px, not to Euclid VIS single exposures. So only the
-principle (S/N threshold, 3σ segmentation, edge test) comes from the paper.
-The S/N formula, the choice of the central region(s) and
-`SEGMENTATION_CENTER_BOX` were chosen for this pipeline. **This definition is
-provisional and may be replaced by a more relevant one**, for example to match
-a later Euclid reference or the needs of the model trained on the dataset.
-
-The code lives in `_segment_source` (`src/dataset_builder.py`) and the
-thresholds in `src/config.py`. The `snr` and `truncated` columns hold values
-computed with the definition in use at build time, so after changing it,
-rebuild the dataset (`--push`) instead of `--merge`-ing new rows into one built
-with the old definition.
-
-#### Flagged pixels: real value vs. zeroed out (`--zero-flagged-pixels`)
-
-Flagged pixels (hot pixels, cosmic rays, saturation — anything caught by
-`FLAG_BITMASK`) are a small minority of a stamp, but their **value** can be
-extreme. By default (`--zero-flagged-pixels` off) `sci_subtracted` keeps
-their real, unmodified value — nothing is thrown away, but a handful of
-outlier pixels can then dominate the value range of the whole stamp (a raw
-`imshow`, `min`/`max`, or any statistic that isn't `binary_mask`-aware will
-be skewed by them), even though a generative model's loss can be told to
-ignore them via `binary_mask` at training time.
-
-With `--zero-flagged-pixels`, those pixels are set to `0.0` directly in
-`sci_subtracted` — the stamp's value range is no longer skewed by
-defects, at the cost of discarding their real value (which some tasks, e.g.
-inpainting-style training, may actually want).
-
-Neither is strictly better — **it's up to whoever builds the dataset to pick
-based on what will consume it.** `binary_mask` records which pixels were
-flagged either way, so the choice is always recoverable/reproducible from the
-dataset itself.
-
-### 5. De-duplicate (optional, `--drop-duplicates`)
-
-`drop_duplicate_obj_ids(dataset)` reduces the dataset to at most one row per
-`obj_id` (first occurrence wins) — useful because a source near a quadrant
-boundary can be selected from more than one quadrant, and an observation can
-overlap its neighbours. When it actually removes rows, it prints how many:
-
-```
-[drop-duplicates] removed 2 duplicate obj_id row(s); 4 unique row(s) kept
-```
-
-Applied twice when relevant:
-
-* right after the build, on the freshly built dataset alone;
-* again in `merge_and_push` when both `--merge` and `--drop-duplicates` are
-  set, on the concatenated dataset — existing Hub rows come first, so they win
-  over colliding new ones.
-
-### 6. Residual PSF (optional)
-
-`add_psf_residual(dataset)` adds a `psf_residual` column. Each `psf_stamp` is
-modelled as `reference_psf (*) kernel`, and the kernel is recovered by dividing
-the two in Fourier space (`compute_psf_residual`). The reference PSF is the
-isotropic 21 × 21 stamp in `src/euclid_vis_isotropic_min_psf.fits`.
-`reconvolve_psf` inverts the operation and is useful to check that a kernel
-round-trips back to its stamp.
-
-### 7. Output
-
-* `dataset.save_to_disk(dir)` — local Arrow dataset.
-* `push_dataset(dataset)` — `push_to_hub`, token from `HF_TOKEN`.
-* `merge_and_push(dataset, drop_duplicates=...)` — `load_dataset(repo_id)` +
-  `concatenate_datasets` + optional dedup + `push_to_hub`, for incrementally
-  growing the Hub dataset across runs. Both datasets must have the same
-  columns: a Hub dataset built before the `snr` / `truncated` columns existed
-  has to be rebuilt (`--push`) before it can be merged into.
-
----
+By default, flagged pixels (hot pixels, cosmic rays, saturation) keep their
+value in `sci_subtracted`: nothing is lost, but a few extreme values can
+dominate the stamp's range unless `binary_mask` is applied downstream.
+`--zero-flagged-pixels` sets them to 0 instead. `binary_mask` records them in
+both cases; choose according to how the dataset will be used.
 
 ## Repository layout
 
 ```
 src/
-├── config.py             constants + data-directory resolution + QUADRANTS
-├── psf_model.py           EuclidPSFModel + reference/residual PSF helpers
-├── dataset_builder.py     source selection, stamp extraction, Dataset assembly
-├── main.py                CLI orchestrator (acquire → extract → build → output)
-└── euclid_vis_isotropic_min_psf.fits   21×21 isotropic reference PSF
+  main.py                CLI: acquire → extract → build → output
+  config.py              constants, data directory, quadrant list
+  dataset_builder.py     source selection, stamp cutting, dataset assembly, Hub push
+  psf_model.py           PSF grid interpolation, residual PSF kernels
+  euclid_vis_isotropic_min_psf.fits    21 × 21 isotropic reference PSF
 utils/
-└── db_utils.py            Euclid archive queries, downloads, quadrant slicing
+  db_utils.py            Euclid archive queries, downloads, quadrant slicing
 notebooks/
-└── build_stamps64_from_drive.ipynb   Colab: slice, build and push from the Drive data
-requirements.txt
+  Clipping_study.ipynb   pixel-value histograms of sci_subtracted
+push.py                  concatenate the batches saved in $SCRATCH/datasets/batch* and push them
 ```
 
-### Data directory layout (after a run)
+After a run, the data directory holds the full frames (`EUC_VIS_SWL-DET-*`,
+`EUC_VIS_SWL-BKG-*`), the PSF model (`EUC_VIS_GRD-PSF-*`), the catalogues
+(`catalogue_obs_<obs_id>.fits`), the per-quadrant files (`quadrant-data/`) and
+the saved dataset (`dataset/`).
 
-```
-$EUCLID_DATA_DIR/
-├── EUC_VIS_SWL-DET-<obs>-00-1-*.fits     full science frames
-├── EUC_VIS_SWL-BKG-<obs>-00-1-*.fits     full background frames
-├── EUC_VIS_GRD-PSF-*.fits                global VIS PSF model
-├── catalogue_obs_<obs>.fits              per-observation cross-matched catalogue
-├── quadrant-data/
-│   ├── ...DET-...*_<q>.fits              per-quadrant SCI + RMS + FLG
-│   ├── ...BKG-...*_<q>.fits              per-quadrant background
-│   └── PSF_<q>.fits                      per-quadrant PSF grid
-└── dataset/                              saved datasets.Dataset (default output)
-```
+## Caveats
 
----
-
-## Programmatic use
-
-Run stage by stage from Python (make sure `src/` and the repo root are on
-`sys.path`, as `src/main.py` does):
-
-```python
-from utils.db_utils import (
-    get_optimal_observation_ids, sync_calibrated_frames, sync_background_frames,
-    sync_psf_model, sync_observation_catalogs,
-    extract_quadrants_from_frames, extract_quadrants_from_backgrounds,
-    extract_quadrants_from_psf,
-)
-from config import DATA_DIR, QUADRANT_DIR, QUADRANTS
-from dataset_builder import build_dataset, add_psf_residual, push_dataset
-
-obs_ids = get_optimal_observation_ids()[:17]
-
-frame_files = sync_calibrated_frames(obs_ids, DATA_DIR)
-sync_background_frames(frame_files, obs_ids, DATA_DIR)
-psf_path = sync_psf_model(DATA_DIR)
-sync_observation_catalogs(obs_ids, DATA_DIR)
-
-extract_quadrants_from_frames(DATA_DIR, QUADRANT_DIR, QUADRANTS)
-extract_quadrants_from_backgrounds(DATA_DIR, QUADRANT_DIR, QUADRANTS)
-extract_quadrants_from_psf(psf_path, QUADRANT_DIR, QUADRANTS)
-
-ds = build_dataset(obs_ids, processes=4)
-ds = add_psf_residual(ds)
-ds.save_to_disk(f"{DATA_DIR}/dataset")
-# push_dataset(ds)   # needs HF_TOKEN
-```
-
-Load it back:
-
-```python
-from datasets import load_from_disk
-ds = load_from_disk(f"{DATA_DIR}/dataset")
-row = ds[0]
-row["sci_subtracted"]   # 64 x 64
-row["psf_stamp"]        # 21 x 21
-```
-
----
-
-## Notes and caveats
-
-* **First dither only.** As the code stands, only dither `00-1` of each
-  observation is used: `get_optimal_observation_ids` keeps the first dither
-  when tiling the footprint, and `sync_calibrated_frames` downloads only the
-  `-00-1-` frames (the other dithers are ignored, with a warning if `00-1` is
-  missing for an observation). Backgrounds, quadrant files and stamps all
-  derive from those frames, so the dataset contains no stamps from any other
-  dither.
-* **PSF tile shape.** `EuclidPSFModel` expects each per-quadrant PSF tile to be
-  `189 × 189` (a 9 × 9 grid of 21 × 21 stamps). A different layout raises a
-  reshape error.
+- Only the first dither (`00-1`) of each observation is used.
+- PSF quadrant tiles must be 189 × 189 px (9 × 9 stamps of 21 × 21).
+- `--merge` needs the Hub dataset to have the same columns as the new rows.
+- On macOS, code that calls the build stage needs an
+  `if __name__ == "__main__":` guard (multiprocessing uses spawn).

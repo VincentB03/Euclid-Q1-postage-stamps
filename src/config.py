@@ -2,30 +2,26 @@ import os
 from astroquery.esa.euclid import Euclid
 
 
-PSF_SIZE = 21           # side of an interpolated PSF stamp (EuclidPSFModel)
-STAMP_SIZE = 64         # side of a science/noise/mask postage stamp
-POINT_PROB = 0.5        # max point_like_prob kept (more point-like -> dropped)
-DISTANCE = 46           # stamp "diagonal" used in the isolation cut, in pixels
-PIXEL_SIZE = 0.1        # VIS pixel scale, arcsec/pixel
+PSF_SIZE = 21           # PSF stamp side (px)
+STAMP_SIZE = 64         # science / noise / mask stamp side (px)
+POINT_PROB = 0.5        # max point_like_prob kept
+DISTANCE = 46           # isolation radius (px), ~half the stamp diagonal
+PIXEL_SIZE = 0.1        # VIS pixel scale (arcsec/px)
 
-# Catalogue quality cuts (dataset_builder.select_sources)
+# Catalogue cuts (select_sources)
 FLUX_MIN = 0.57544
 FLUX_MAX = 575.44
 MAX_SPURIOUS_PROB = 0.2
 
-# Stamp quality
-FLAG_BITMASK = 1       # VIS FLG bits rejected ("bad pixels in Euclid Data Product Description")
-MAX_BAD_PIXEL_FRACTION = 0.08    # drop a stamp at/above this fraction of flagged pixels
-SEGMENTATION_NSIGMA = 3.0        # pixel threshold (x noise_map) of the source segmentation map
-SEGMENTATION_CENTER_BOX = 5      # side (px) of the central box whose segments make up the source
+# Stamp cuts
+FLAG_BITMASK = 1                 # VIS FLG bits counted as bad pixels
+MAX_BAD_PIXEL_FRACTION = 0.08    # drop a stamp at/above this fraction of bad pixels
+SEGMENTATION_NSIGMA = 3.0        # segmentation threshold, in units of noise_map
+SEGMENTATION_CENTER_BOX = 5      # central box (px) whose regions make up the source
 
-# Hugging Face target dataset
-HF_REPO_ID = 'VincentB03/euclid-Q1-V2'
+HF_REPO_ID = 'VincentB03/Euclid-Q1-VF'   # default --repo-id
 
-# Data location. Set the EUCLID_DATA_DIR environment variable to either a Google
-# Drive path (Colab) or any local path. If it is unset, fall back to the Drive
-# mount point when running on Colab, otherwise to a local 'data' folder at the
-# repository root.
+# EUCLID_DATA_DIR, else the Colab Drive folder if mounted, else <repo>/data/Q1_VIS_CALIBRATED_DB
 _DRIVE_DATA_DIR = '/content/drive/MyDrive/Q1_VIS_CALIBRATED_DB'
 _LOCAL_DATA_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

@@ -1,13 +1,7 @@
-"""Build the Euclid Q1 VIS postage-stamp dataset.
+"""Build the Euclid Q1 VIS postage-stamp dataset, one observation per process.
 
-For every selected, isolated source in each observation catalogue, cut a
-background-subtracted ``STAMP_SIZE`` science stamp with its noise map,
-bad-pixel mask and locally interpolated PSF, then assemble the records into a
-``datasets.Dataset``. Work is parallelised one observation per process.
-
-Multiprocessing uses 'spawn' on macOS, so scripts that call
-``build_dataset`` / ``iter_records`` must guard the entry point with
-``if __name__ == "__main__":``.
+On macOS (spawn start method), scripts calling ``build_dataset`` /
+``iter_records`` need an ``if __name__ == "__main__":`` guard.
 """
 
 import functools
@@ -47,7 +41,7 @@ from config import (
 )
 from psf_model import EuclidPSFModel
 
-# Filename pattern of an extracted science quadrant (see utils/db_utils.py).
+# Extracted science quadrant file name -> (core id, quadrant)
 _FRAME_RE = re.compile(r'-DET-(\d{6}-\d{2}-\d+)-.*_([1-6]-[1-6]-[E-H])\.fits')
 
 # Schema of one dataset row.
@@ -89,11 +83,8 @@ def select_sources(catalogue):
 
 
 def apply_isolation_cut(sources, catalogue, distance=DISTANCE, pixel_size=PIXEL_SIZE):
-    """Drop sources whose 2nd-nearest catalogue neighbour is too close.
-
-    Minimum separation (arcsec) is
-    ``(distance + neighbour_semimajor_axis // 2) * pixel_size``.
-    """
+    """Keep sources whose nearest catalogue neighbour is farther than
+    ``(distance + neighbour_semimajor_axis // 2) * pixel_size`` arcsec."""
     if len(sources) == 0:
         return sources
 
@@ -114,8 +105,7 @@ def apply_isolation_cut(sources, catalogue, distance=DISTANCE, pixel_size=PIXEL_
 def _resolve_files(obs_id, quadrant, quadrant_dir):
     """``(sci_path, bkg_path, psf_path)`` for one obs_id/quadrant, or None."""
     q_str = quadrant.replace(".", "-")
-    # Zero-padded and dash-delimited: a bare obs_id also matches digits of
-    # another frame's timestamp (e.g. 2682 in '...T045100.762682Z').
+    # Padded and dash-delimited, or 2682 would also match '...T045100.762682Z'
     sci_files = glob.glob(os.path.join(quadrant_dir, f'*-DET-{str(obs_id).zfill(6)}-*_{q_str}.fits'))
     if not sci_files:
         return None
@@ -136,15 +126,12 @@ def _resolve_files(obs_id, quadrant, quadrant_dir):
 
 def _segment_source(sci_sub, rms_stamp, bad_pixels, center, nsigma=SEGMENTATION_NSIGMA,
                     center_box=SEGMENTATION_CENTER_BOX):
-    """``(snr, truncated)`` of the source at ``center`` from its segmentation map.
+    """``(snr, truncated)`` of the source at ``center`` ``(row, col)``.
 
-    Unflagged pixels above ``nsigma * rms`` are grouped into 8-connected
-    regions; the source is the union of the regions that reach the
-    ``center_box`` x ``center_box`` box around ``center`` ``(row, col)``. A box
-    rather than the single center pixel keeps sources whose center pixel is
-    flagged or slightly offset. ``snr`` is the isophotal S/N,
-    ``sum(signal) / sqrt(sum(rms**2))``, and ``truncated`` tells whether the
-    source touches the stamp edge. No region in the box gives ``(0.0, False)``.
+    The source is the union of the 8-connected regions of unflagged pixels
+    above ``nsigma * rms`` that reach the central ``center_box`` box.
+    ``snr = sum(signal) / sqrt(sum(rms**2))`` over it; ``truncated`` if it
+    touches the stamp edge. No region in the box gives ``(0.0, False)``.
     """
     above = (sci_sub > nsigma * rms_stamp) & ~bad_pixels
     labels, _ = ndimage.label(above, structure=np.ones((3, 3)))
@@ -174,20 +161,13 @@ def _extract_stamp(source, obs_id, quadrant, sci_data, bkg_data, flg_data, rms_d
         y_slice, x_slice = cutout.slices_original
         bkg_stamp = bkg_data[y_slice, x_slice]
         flg_stamp = flg_data[y_slice, x_slice]
-        # .astype() forces native byte order: FITS data is big-endian, and raw
-        # slices (unlike sci_sub/binary_mask below, which go through an
-        # arithmetic op that already converts) keep that byte order, which
-        # pyarrow's writer rejects ("Byte-swapped arrays not supported").
+        # Native byte order: pyarrow rejects big-endian FITS slices
         rms_stamp = rms_data[y_slice, x_slice].astype(np.float32)
 
         bad_pixels = (flg_stamp & FLAG_BITMASK) != 0
         if bad_pixels.sum() / bad_pixels.size >= MAX_BAD_PIXEL_FRACTION:
             return None
 
-        # By default, flagged pixels keep their real (science - background) value;
-        # they are only counted for the fraction cut above and recorded in
-        # binary_mask. With zero_flagged_pixels=True they are zeroed out here
-        # instead (see build_dataset's docstring for the tradeoff).
         sci_sub = cutout.data.astype(float) - bkg_stamp
         if zero_flagged_pixels:
             sci_sub[bad_pixels] = 0.0
@@ -302,11 +282,8 @@ def process_obs_id(obs_id, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR, quadran
 def iter_records(obs_ids, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR,
                  quadrants=QUADRANTS, processes=None, zero_flagged_pixels=False,
                  min_snr=None, drop_truncated=False, verbose=False):
-    """Yield one record dict per stamp, one observation per worker.
-
-    ``processes=1`` runs sequentially (handy for debugging); otherwise an
-    ``imap_unordered`` pool of ``processes`` workers (default: all cores).
-    """
+    """Yield one record per stamp; ``processes=1`` runs sequentially, else a pool
+    (default: all cores)."""
     obs_ids = list(obs_ids)
     worker = functools.partial(process_obs_id, data_dir=data_dir,
                                quadrant_dir=quadrant_dir, quadrants=list(quadrants),
@@ -337,31 +314,12 @@ def iter_records(obs_ids, data_dir=DATA_DIR, quadrant_dir=QUADRANT_DIR,
 def build_dataset(obs_ids, quadrants=QUADRANTS, data_dir=DATA_DIR,
                   quadrant_dir=QUADRANT_DIR, processes=None, zero_flagged_pixels=False,
                   min_snr=None, drop_truncated=False, verbose=False):
-    """Materialise the postage-stamp dataset from the record generator.
+    """Build the ``datasets.Dataset`` of stamps for ``obs_ids``.
 
-    ``zero_flagged_pixels`` controls what ``sci_subtracted`` holds at pixels
-    flagged bad in ``FLG`` (see ``FLAG_BITMASK``):
-
-    - ``False`` (default): keep their real (science - background) value.
-      Since a handful of defective pixels can carry extreme values (hot
-      pixels, cosmic rays, saturation), they can dominate the stamp's value
-      range even though they are a small minority of it -- a problem if
-      something naively looks at min/max or a raw display, even though a
-      generative model's loss can be told to ignore them via
-      ``binary_mask``.
-    - ``True``: zero them out directly in ``sci_subtracted`` (matches the
-      original exploratory notebook this pipeline was ported from).
-
-    Neither option is strictly better: zeroing loses the real pixel value
-    (useful e.g. for inpainting-style tasks) but gives a display/statistics
-    that isn't skewed by defects; keeping it preserves information but
-    requires consistently applying ``binary_mask`` downstream. Pick based on
-    what consumes the dataset.
-
-    Every row stores the ``snr`` and ``truncated`` of its source, measured on
-    a ``SEGMENTATION_NSIGMA`` segmentation map (see ``_segment_source``).
-    ``min_snr`` drops sources with ``snr <= min_snr``; ``drop_truncated`` drops
-    sources whose segmentation touches the stamp edge.
+    ``zero_flagged_pixels`` sets flagged pixels of ``sci_subtracted`` to 0
+    (default: keep their value; ``binary_mask`` records them either way).
+    ``min_snr`` drops sources with ``snr <= min_snr``, ``drop_truncated`` those
+    touching the stamp edge (see ``_segment_source``).
     """
     return Dataset.from_generator(
         iter_records,
@@ -408,11 +366,8 @@ def push_dataset(dataset, repo_id=HF_REPO_ID, private=True, token=None):
 
 def merge_and_push(new_dataset, repo_id=HF_REPO_ID, private=True, token=None,
                    drop_duplicates=False, verbose=True):
-    """Concatenate with the existing Hub dataset, then push the union back.
-
-    With ``drop_duplicates`` the merged dataset is reduced to one row per
-    ``obj_id``; existing rows come first, so they win over new colliding ones.
-    """
+    """Append to the existing Hub dataset and push; with ``drop_duplicates``,
+    existing rows win over colliding new ones."""
     from datasets import concatenate_datasets, load_dataset
 
     token = token or os.environ.get("HF_TOKEN")
@@ -432,7 +387,7 @@ _CARD_END = "<!-- BUILD-INFO:END -->"
 
 
 def render_build_info(dataset, params=None, command=None):
-    """Markdown block describing how ``dataset`` was produced by ``src/main.py``."""
+    """Markdown "Build info" block for the Hub dataset card."""
     obs_ids = sorted(set(dataset["obs_id"]))
     columns = "\n".join(
         f"| `{name}` | {feat} |" for name, feat in dataset.features.items()
@@ -481,24 +436,17 @@ def render_build_info(dataset, params=None, command=None):
 
 
 def update_dataset_card(repo_id, dataset, params=None, command=None, token=None):
-    """Append/refresh the ``BUILD-INFO`` block at the end of the Hub dataset card.
-
-    Any hand-written presentation in the card is kept untouched: a previous
-    ``BUILD-INFO`` block (wherever it sits) is stripped, then a fresh one is
-    appended after the existing text.
-    """
-    import re as _re
-
+    """Replace the ``BUILD-INFO`` block of the Hub dataset card, keeping the rest of the text."""
     from huggingface_hub import DatasetCard
 
     token = token or os.environ.get("HF_TOKEN")
     card = DatasetCard.load(repo_id, token=token)
 
-    text = _re.sub(
-        _re.escape(_CARD_START) + r".*?" + _re.escape(_CARD_END),
+    text = re.sub(
+        re.escape(_CARD_START) + r".*?" + re.escape(_CARD_END),
         "",
         card.text or "",
-        flags=_re.DOTALL,
+        flags=re.DOTALL,
     ).rstrip()
 
     block = render_build_info(dataset, params, command)
@@ -508,10 +456,7 @@ def update_dataset_card(repo_id, dataset, params=None, command=None, token=None)
 
 
 def add_psf_residual(dataset, reference_psf_path=None, batch_size=256):
-    """Add a ``psf_residual`` column: kernel such that ``psf_ref (*) kernel = psf_stamp``.
-
-    Needs the isotropic reference PSF FITS (see ``psf_model.DEFAULT_REFERENCE_PSF``).
-    """
+    """Add a ``psf_residual`` column: kernel such that ``psf_ref (*) kernel = psf_stamp``."""
     from psf_model import centered_fft2, compute_psf_residual, load_reference_psf
 
     psf_ref = (load_reference_psf() if reference_psf_path is None

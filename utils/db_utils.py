@@ -1,3 +1,5 @@
+"""Euclid Q1 archive queries, downloads and per-quadrant slicing of the VIS products."""
+
 import os
 import glob
 import numpy as np
@@ -7,16 +9,9 @@ from astroquery.esa.euclid import Euclid
 
 
 def get_optimal_observation_ids(round_decimals=1, verbose=True):
-    """
-    Retrieves the optimal observation IDs (1st dither only) to obtain
-    a unique spatial coverage on the VIS instrument in Q1 data.
+    """Observation IDs (first dither) that tile the Q1 VIS footprint once.
 
-    Args:
-        round_decimals (int): Number of decimals for rounding RA/DEC coordinates (default: 1).
-        verbose (bool): Shows or hides information messages and previews (default: True).
-
-    Returns:
-        list: A list containing the 'observation_id' as strings.
+    Pointings are de-duplicated on RA/Dec rounded to ``round_decimals``.
     """
     if verbose:
         print("Launching query: calculating the optimal number of images...")
@@ -27,24 +22,19 @@ def get_optimal_observation_ids(round_decimals=1, verbose=True):
     WHERE instrument_name = 'VIS'
     """
 
-    # Execute the query via the Euclid API
     job = Euclid.launch_job_async(query)
     raw_observations = job.get_results()
-
-    # Convert to pandas DataFrame
     df = raw_observations.to_pandas()
 
     if verbose:
         print("Calculating optimal spatial coverage (1st dither only)...\n")
 
-    # Isolate the 1st dither by removing duplicate observation IDs
+    # First row per observation_id = first dither
     df_first_dither = df.drop_duplicates(subset=['observation_id']).copy()
 
-    # Spatial rounding to approximate the tiles
     df_first_dither['ra_round'] = df_first_dither['ra'].round(round_decimals)
     df_first_dither['dec_round'] = df_first_dither['dec'].round(round_decimals)
 
-    # Spatial deduplication and sorting by declination
     optimal_tiles = df_first_dither.drop_duplicates(subset=['ra_round', 'dec_round'])
     optimal_tiles = optimal_tiles.sort_values(by='dec', ascending=False)
 
@@ -53,30 +43,20 @@ def get_optimal_observation_ids(round_decimals=1, verbose=True):
         print("\nPreview of the first saved tiles:")
         print(optimal_tiles[['ra', 'dec', 'ra_round', 'dec_round', 'observation_id']].head())
 
-    # Generate and return the final observation ID list
     return optimal_tiles['observation_id'].tolist()
 
+
 def sync_calibrated_frames(obs_id_list, data_dir, verbose=True):
-    """
-    Locates and downloads the required Euclid VIS calibrated frame FITS files 
-    for the given observation IDs (specifically filtering for dither '00-1').
+    """Download the missing VIS science (DET) frames, dither ``00-1`` only.
 
-    Args:
-        obs_id_list (list): List of observation IDs to check and download.
-        data_dir (str): Directory path where FITS files are stored locally.
-        verbose (bool): Shows or hides detailed console logs (default: True).
-
-    Returns:
-        dict: A dictionary mapping observation_id to its local file path.
+    Returns ``{obs_id: local_path}`` for the frames available on disk.
     """
     if verbose:
         print(f"Locating file paths for {len(obs_id_list)} observations...")
 
-    # Scan existing local files to avoid redundant downloads
     existing = glob.glob(os.path.join(data_dir, '*.fits'))
     existing_files = {os.path.basename(f): f for f in existing}
 
-    # Build SQL LIKE conditions dynamically for the ADQL query
     like_conditions = " OR ".join([f"file_name LIKE '%-{str(obs_id).zfill(6)}-%'" for obs_id in obs_id_list])
 
     adql_query = f"""
@@ -94,11 +74,8 @@ def sync_calibrated_frames(obs_id_list, data_dir, verbose=True):
     needed_downloads = []
     frame_files = {}
 
-    # Parse archive results and filter for the first dither (00-1)
     for obs_id in obs_id_list:
         obs_id_padded = str(obs_id).zfill(6)
-
-        # Find archive rows matching the padded observation ID
         matches_for_obs = [r for r in vis_table if f"-{obs_id_padded}-" in r['file_name']]
 
         if not matches_for_obs:
@@ -106,7 +83,6 @@ def sync_calibrated_frames(obs_id_list, data_dir, verbose=True):
                 print(f"  WARNING: No files found in archive for obs_id {obs_id}.")
             continue
 
-        # Look specifically for the first dither '00-1'
         dither_1_matches = [r for r in matches_for_obs if '-00-1-' in r['file_name']]
 
         if not dither_1_matches:
@@ -116,7 +92,6 @@ def sync_calibrated_frames(obs_id_list, data_dir, verbose=True):
 
         target_file_name = dither_1_matches[0]['file_name']
 
-        # Determine if the file exists locally or needs to be downloaded
         if target_file_name in existing_files:
             outpath = existing_files[target_file_name]
             frame_files[obs_id] = outpath
@@ -127,7 +102,6 @@ def sync_calibrated_frames(obs_id_list, data_dir, verbose=True):
             if verbose:
                 print(f"  MISSING: {target_file_name} (obs_id {obs_id}), queued for download.")
 
-    # Process downloads if any files are missing
     if needed_downloads:
         if verbose:
             print(f"\nDownloading {len(needed_downloads)} missing files")
@@ -155,28 +129,16 @@ def sync_calibrated_frames(obs_id_list, data_dir, verbose=True):
 
 
 def sync_background_frames(frame_files, obs_id_list, data_dir, verbose=True):
-    """
-    Locates and downloads the required Euclid VIS background (BKG) FITS files 
-    associated with the successfully resolved science (calibrated) frames.
-    A background is only fetched if its science (DET) frame exists on disk.
+    """Download the missing background (BKG) frames matching the science frames on disk.
 
-    Args:
-        frame_files (dict): Dictionary mapping observation IDs to their local science file paths.
-        obs_id_list (list): List of observation IDs to construct the query filters.
-        data_dir (str): Directory path where FITS files are stored locally.
-        verbose (bool): Shows or hides detailed console logs (default: True).
-
-    Returns:
-        dict: A dictionary mapping observation_id to its local background file path.
+    Returns ``{obs_id: local_path}``.
     """
     if verbose:
         print(f"Locating background (BKG) files for {len(frame_files)} images...")
 
-    # Find existing local background files to avoid redundant downloads
     bkg_existing = glob.glob(os.path.join(data_dir, '*BKG*.fits'))
     bkg_existing_files = {os.path.basename(f): f for f in bkg_existing}
 
-    # Build SQL LIKE conditions dynamically for the ADQL query
     like_conditions = " OR ".join([f"file_name LIKE '%-{str(obs_id).zfill(6)}-%'" for obs_id in obs_id_list])
 
     adql_query_bkg = f"""
@@ -195,25 +157,21 @@ def sync_background_frames(frame_files, obs_id_list, data_dir, verbose=True):
     needed_downloads_bkg = []
     bkg_files = {}
 
-    # Match background files to their corresponding local science files
     for obs_id, sci_path in frame_files.items():
         sci_filename = os.path.basename(sci_path)
 
-        # Only fetch the background if the science (DET) frame is actually on disk
         if not os.path.exists(sci_path):
             if verbose:
                 print(f"  WARNING: Science image not found on disk for obs_id {obs_id} ({sci_filename}). Skipping BKG.")
             continue
 
+        # The BKG file name mirrors the DET one: EUC_VIS_SWL-BKG-<obs>-<dither>-...
         parts = sci_filename.split('-')
-        
-        # Reconstruct the expected background file pattern from the science filename
         if len(parts) >= 5:
             expected_bkg_core = f"{parts[0]}-BKG-{parts[2]}-{parts[3]}-{parts[4]}"
         else:
             expected_bkg_core = f"-BKG-{str(obs_id).zfill(6)}"
 
-        # Find the row in the query results matching the expected background core string
         matching_bkg_rows = [r for r in bkg_table if expected_bkg_core in r['file_name']]
 
         if not matching_bkg_rows:
@@ -223,7 +181,6 @@ def sync_background_frames(frame_files, obs_id_list, data_dir, verbose=True):
 
         exact_bkg_name = matching_bkg_rows[0]['file_name']
 
-        # Determine if the background file exists locally or needs downloading
         if exact_bkg_name in bkg_existing_files:
             outpath = bkg_existing_files[exact_bkg_name]
             bkg_files[obs_id] = outpath
@@ -234,16 +191,15 @@ def sync_background_frames(frame_files, obs_id_list, data_dir, verbose=True):
             if verbose:
                 print(f"  MISSING (BKG): {exact_bkg_name}")
 
-    # Process background downloads if any files are missing
     if needed_downloads_bkg:
         if verbose:
             print(f"\nDownloading {len(needed_downloads_bkg)} missing background files...")
-            
+
         for obs_id, fname in needed_downloads_bkg:
             outpath = os.path.join(data_dir, fname)
             if verbose:
                 print(f"  Downloading BKG: {fname}")
-                
+
             Euclid.get_product(file_name=fname, output_file=outpath)
             bkg_files[obs_id] = outpath
     else:
@@ -257,22 +213,13 @@ def sync_background_frames(frame_files, obs_id_list, data_dir, verbose=True):
 
 
 def sync_psf_model(data_dir, verbose=True):
-    """
-    Locates the global Euclid VIS Point Spread Function (PSF) model FITS file.
-    Checks local storage first (including a 'psf_models' subfolder), 
-    then queries the archive and downloads it if missing.
+    """Path of the global VIS PSF model, downloaded if not on disk.
 
-    Args:
-        data_dir (str): Directory path where FITS files are stored locally.
-        verbose (bool): Shows or hides detailed console logs (default: True).
-
-    Returns:
-        str: The absolute local file path to the resolved PSF model FITS file.
+    Looks in ``data_dir`` and ``data_dir/psf_models`` first.
     """
     if verbose:
         print("Locating PSF model file...")
 
-    # Check for existing PSF files locally (either in a subfolder or root data directory)
     psf_existing = glob.glob(os.path.join(data_dir, 'psf_models', 'EUC_VIS_GRD-PSF-*.fits'))
     if not psf_existing:
         psf_existing = glob.glob(os.path.join(data_dir, 'EUC_VIS_GRD-PSF-*.fits'))
@@ -283,55 +230,46 @@ def sync_psf_model(data_dir, verbose=True):
             print(f"  FOUND on disk: {os.path.basename(psf_full_path)}")
         return psf_full_path
 
-    # If missing locally, query the Euclid metadata archive
     if verbose:
         print("  Querying archive for PSF file...")
-        
+
     adql_query_psf = """
         SELECT DISTINCT file_name
         FROM q1.aux_calibrated
         WHERE instrument_name = 'VIS'
           AND stype = 'PSF MODEL'
     """
-    
+
     job_psf = Euclid.launch_job_async(query=adql_query_psf)
     psf_res = job_psf.get_results()
-    
+
     if len(psf_res) == 0:
         raise FileNotFoundError("Error: No PSF model file found in the Euclid archive.")
 
     psf_fname = psf_res['file_name'][0]
     psf_full_path = os.path.join(data_dir, psf_fname)
-    
-    # Process the download
+
     if verbose:
         print(f"  Downloading: {psf_fname}")
-        
+
     Euclid.get_product(file_name=psf_fname, output_file=psf_full_path)
-    
+
     if verbose:
         print("PSF model sync completed successfully.\n")
-        
+
     return psf_full_path
 
 
 def sync_observation_catalogs(obs_id_list, data_dir, verbose=True):
-    """
-    Computes spatial footprints from local science images, queries the Euclid Archive 
-    for cross-matched multi-table catalogs (MER + PHZ), and saves them as FITS tables.
+    """Download the cross-matched MER + PHZ + morphology catalogue of each observation.
 
-    Args:
-        obs_id_list (list): List of observation IDs to process.
-        data_dir (str): Directory path where science images are stored and catalogs will be saved.
-        verbose (bool): Shows or hides detailed console logs (default: True).
-
-    Returns:
-        dict: A dictionary mapping observation_id to its local catalog FITS file path.
+    The query box is the RA/Dec footprint of the observation's science frame
+    (read from the WCS of its ``*.SCI`` extensions), so the DET frame must be
+    on disk. Returns ``{obs_id: catalogue_path}``.
     """
     if verbose:
         print(f"Syncing catalogs for {len(obs_id_list)} observation IDs...")
 
-    # Look for the large local science detection frames to compute spatial footprints
     large_sci_files = glob.glob(os.path.join(data_dir, '*-DET-*.fits'))
     catalog_paths = {}
 
@@ -339,14 +277,12 @@ def sync_observation_catalogs(obs_id_list, data_dir, verbose=True):
         obs_id_padded = str(obs_id).zfill(6)
         cat_dst = os.path.join(data_dir, f'catalogue_obs_{obs_id_padded}.fits')
 
-        # Check if the catalog file is already present on disk
         if os.path.exists(cat_dst):
             catalog_paths[obs_id] = cat_dst
             if verbose:
                 print(f"\n  SKIP: Catalog for obs_id {obs_id} already exists ({os.path.basename(cat_dst)}).")
             continue
 
-        # Find the corresponding science image to extract WCS footprint
         matching_files = [f for f in large_sci_files if f"-{obs_id_padded}-" in os.path.basename(f)]
 
         if not matching_files:
@@ -360,7 +296,6 @@ def sync_observation_catalogs(obs_id_list, data_dir, verbose=True):
 
         ra_all, dec_all = [], []
         try:
-            # Parse all .SCI extensions to map out the total bounding box
             with fits.open(big_image_path) as hdul:
                 for ext in hdul:
                     if ext.name.endswith('.SCI'):
@@ -368,7 +303,6 @@ def sync_observation_catalogs(obs_id_list, data_dir, verbose=True):
                         w = WCS(h)
                         nx, ny = h['NAXIS1'], h['NAXIS2']
 
-                        # Coordinate pairs for the 4 corners of this specific detector
                         corners = np.array([[0, 0], [nx, 0], [nx, ny], [0, ny]], dtype=float)
                         ra, dec = w.all_pix2world(corners[:, 0], corners[:, 1], 0)
                         ra_all.extend(ra)
@@ -383,15 +317,13 @@ def sync_observation_catalogs(obs_id_list, data_dir, verbose=True):
                 print(f"  WARNING: No coordinates extracted for obs_id {obs_id}.")
             continue
 
-        # Extract strict bounding box limits
         ra_min, ra_max = min(ra_all), max(ra_all)
         dec_min, dec_max = min(dec_all), max(dec_all)
-        
+
         if verbose:
             print(f"    Global search area: RA=[{ra_min:.4f}, {ra_max:.4f}], DEC=[{dec_min:.4f}, {dec_max:.4f}]")
             print("    Launching ADQL query to Euclid Archive...")
 
-        # Construct comprehensive cross-matched ADQL Query
         query = f"""
         SELECT
         m.object_id,
@@ -438,14 +370,12 @@ def sync_observation_catalogs(obs_id_list, data_dir, verbose=True):
         """
 
         try:
-            # Query the database
             job_cat = Euclid.launch_job_async(query)
             cat = job_cat.get_results()
 
             if len(cat) > 0:
                 if verbose:
                     print(f"    SUCCESS: {len(cat)} sources found for this observation.")
-                # Save as a local FITS file table
                 cat.write(cat_dst, format='fits', overwrite=True)
                 catalog_paths[obs_id] = cat_dst
                 if verbose:
@@ -466,26 +396,14 @@ def sync_observation_catalogs(obs_id_list, data_dir, verbose=True):
 
 def extract_quadrants_from_frames(data_dir, quadrant_dir, quadrants_list, obs_ids=None,
                                   verbose=True):
-    """
-    Extracts specific quadrants (.SCI, .RMS, .FLG) from full Euclid VIS
-    science frames and saves them as smaller, standalone FITS files.
+    """Slice each ``*-DET-*.fits`` frame into per-quadrant files (primary + SCI + RMS + FLG).
 
-    Args:
-        data_dir (str): Directory containing the full '*-DET-*.fits' science frames.
-        quadrant_dir (str): Directory where the extracted quadrant FITS files will be saved.
-        quadrants_list (list): List of quadrant strings to extract (e.g., ['1-1.E', '3-4.F']).
-        obs_ids (list, optional): Restrict extraction to frames matching these observation
-            IDs. Defaults to None, i.e. every '*-DET-*.fits' frame found in ``data_dir``.
-        verbose (bool): Shows or hides detailed console logs (default: True).
-
-    Returns:
-        dict: A dictionary mapping the original full FITS filename to a list
-              of its extracted quadrant file paths.
+    ``obs_ids`` restricts the frames processed (default: all in ``data_dir``);
+    quadrants already on disk are skipped. Returns ``{frame_name: [quadrant paths]}``.
     """
     if verbose:
         print(f"Extracting quadrants to {quadrant_dir}...")
 
-    # Locate all main science detection frames, restricted to the requested obs_ids
     science_files = glob.glob(os.path.join(data_dir, '*-DET-*.fits'))
     if obs_ids is not None:
         padded_ids = {str(obs_id).zfill(6) for obs_id in obs_ids}
@@ -502,13 +420,10 @@ def extract_quadrants_from_frames(data_dir, quadrant_dir, quadrants_list, obs_id
         destinations = {}
         extracted_files_map[filename] = []
 
-        # Determine which quadrants actually need to be extracted
         for quadrant in quadrants_list:
             safe_quad_name = quadrant.replace(".", "-")
             out_basename = filename.replace('.fits', f'_{safe_quad_name}.fits')
             dst = os.path.join(quadrant_dir, out_basename)
-            
-            # Keep track of the final paths regardless of whether they existed before
             extracted_files_map[filename].append(dst)
 
             if not os.path.exists(dst):
@@ -525,7 +440,6 @@ def extract_quadrants_from_frames(data_dir, quadrant_dir, quadrants_list, obs_id
 
         try:
             with fits.open(sci_file) as hdul:
-                # Keep the PrimaryHDU to preserve the global observation metadata
                 primary_hdu = fits.PrimaryHDU(header=hdul[0].header)
 
                 for quadrant in quadrants_to_extract:
@@ -534,7 +448,6 @@ def extract_quadrants_from_frames(data_dir, quadrant_dir, quadrants_list, obs_id
                     rms_ext = f'{quadrant}.RMS'
                     flg_ext = f'{quadrant}.FLG'
 
-                    # Verify that the required extensions exist in this FITS file
                     if sci_ext in hdul and rms_ext in hdul and flg_ext in hdul:
                         new_hdus = [
                             primary_hdu,
@@ -542,8 +455,6 @@ def extract_quadrants_from_frames(data_dir, quadrant_dir, quadrants_list, obs_id
                             hdul[rms_ext].copy(),
                             hdul[flg_ext].copy()
                         ]
-
-                        # Save the new quadrant-specific FITS file
                         new_hdul = fits.HDUList(new_hdus)
                         new_hdul.writeto(dst, overwrite=True)
                     else:
@@ -562,26 +473,13 @@ def extract_quadrants_from_frames(data_dir, quadrant_dir, quadrants_list, obs_id
 
 def extract_quadrants_from_backgrounds(data_dir, quadrant_dir, quadrants_list, obs_ids=None,
                                        verbose=True):
-    """
-    Extracts specific quadrants from full Euclid VIS background (BKG) frames
-    and saves them as smaller, standalone FITS files.
+    """Slice each ``*-BKG-*.fits`` frame into per-quadrant files (primary + quadrant).
 
-    Args:
-        data_dir (str): Directory containing the full '*-BKG-*.fits' background frames.
-        quadrant_dir (str): Directory where the extracted quadrant FITS files will be saved.
-        quadrants_list (list): List of quadrant strings to extract (e.g., ['1-1.E', '3-4.F']).
-        obs_ids (list, optional): Restrict extraction to frames matching these observation
-            IDs. Defaults to None, i.e. every '*-BKG-*.fits' frame found in ``data_dir``.
-        verbose (bool): Shows or hides detailed console logs (default: True).
-
-    Returns:
-        dict: A dictionary mapping the original full BKG filename to a list
-              of its extracted quadrant file paths.
+    Same behaviour and return value as :func:`extract_quadrants_from_frames`.
     """
     if verbose:
         print(f"Extracting background quadrants to {quadrant_dir}...")
 
-    # Locate all background frames, restricted to the requested obs_ids
     bkg_files_list = glob.glob(os.path.join(data_dir, '*-BKG-*.fits'))
     if obs_ids is not None:
         padded_ids = {str(obs_id).zfill(6) for obs_id in obs_ids}
@@ -598,13 +496,10 @@ def extract_quadrants_from_backgrounds(data_dir, quadrant_dir, quadrants_list, o
         destinations = {}
         extracted_bkg_map[filename] = []
 
-        # Determine which background quadrants actually need to be extracted
         for quadrant in quadrants_list:
             safe_quad_name = quadrant.replace(".", "-")
             out_basename = filename.replace('.fits', f'_{safe_quad_name}.fits')
             dst = os.path.join(quadrant_dir, out_basename)
-            
-            # Keep track of the final paths
             extracted_bkg_map[filename].append(dst)
 
             if not os.path.exists(dst):
@@ -621,21 +516,18 @@ def extract_quadrants_from_backgrounds(data_dir, quadrant_dir, quadrants_list, o
 
         try:
             with fits.open(bkg_file) as hdul:
-                # Keep the PrimaryHDU to preserve global metadata
                 primary_hdu = fits.PrimaryHDU(header=hdul[0].header)
                 success_count = 0
 
                 for quadrant in quadrants_to_extract:
                     dst = destinations[quadrant]
 
-                    # Note: Background files usually have the quadrant name directly as the extension name
+                    # BKG extensions are named after the quadrant itself (no .SCI suffix)
                     if quadrant in hdul:
                         new_hdus = [
                             primary_hdu,
                             hdul[quadrant].copy()
                         ]
-
-                        # Save the new quadrant-specific FITS file
                         new_hdul = fits.HDUList(new_hdus)
                         new_hdul.writeto(dst, overwrite=True)
                         success_count += 1
@@ -657,19 +549,7 @@ def extract_quadrants_from_backgrounds(data_dir, quadrant_dir, quadrants_list, o
 
 
 def extract_quadrants_from_psf(psf_full_path, quadrant_dir, quadrants_list, verbose=True):
-    """
-    Extracts specific quadrants from the global Euclid VIS PSF model file 
-    and saves them as standalone FITS files.
-
-    Args:
-        psf_full_path (str): The absolute path to the global PSF model FITS file.
-        quadrant_dir (str): Directory where the extracted PSF quadrant FITS files will be saved.
-        quadrants_list (list): List of quadrant strings to extract (e.g., ['1-1.E', '3-4.F']).
-        verbose (bool): Shows or hides detailed console logs (default: True).
-
-    Returns:
-        list: A list of the absolute file paths to the successfully extracted PSF quadrants.
-    """
+    """Slice the global PSF model into ``PSF_<quadrant>.fits`` files; returns their paths."""
     if verbose:
         print(f"Extracting PSF quadrants to {quadrant_dir}...")
 
@@ -682,11 +562,9 @@ def extract_quadrants_from_psf(psf_full_path, quadrant_dir, quadrants_list, verb
     quadrants_to_extract = []
     destinations = {}
 
-    # Check which PSF quadrants already exist locally
     for quadrant in quadrants_list:
         safe_quad_name = quadrant.replace(".", "-")
         psf_dst = os.path.join(quadrant_dir, f'PSF_{safe_quad_name}.fits')
-        
         extracted_psf_paths.append(psf_dst)
 
         if not os.path.exists(psf_dst):
@@ -703,20 +581,17 @@ def extract_quadrants_from_psf(psf_full_path, quadrant_dir, quadrants_list, verb
 
     try:
         with fits.open(psf_full_path) as hdul:
-            # Keep the PrimaryHDU to preserve the global PSF metadata
             primary_hdu = fits.PrimaryHDU(header=hdul[0].header)
             success_count = 0
 
             for quadrant in quadrants_to_extract:
                 dst = destinations[quadrant]
 
-                # Ensure the requested quadrant exists in the global PSF model
                 if quadrant in hdul:
                     new_hdus = [
                         primary_hdu,
                         hdul[quadrant].copy()
                     ]
-                    
                     new_hdul = fits.HDUList(new_hdus)
                     new_hdul.writeto(dst, overwrite=True)
                     success_count += 1
