@@ -104,7 +104,8 @@ dataset card, leaving the rest of the card as is.
    quadrant's 9 × 9 PSF grid.
 6. **Post-process** (optional): de-duplicate `obj_id` (a source can appear in
    several quadrants or observations); add `psf_residual` by dividing
-   `psf_stamp` by the isotropic reference PSF in Fourier space.
+   `psf_stamp` by the isotropic reference PSF in Fourier space
+   ([see below](#reference-psf)).
 
 All thresholds are in [`src/config.py`](src/config.py).
 
@@ -138,6 +139,17 @@ dominate the stamp's range unless `binary_mask` is applied downstream.
 `--zero-flagged-pixels` sets them to 0 instead. `binary_mask` records them in
 both cases; choose according to how the dataset will be used.
 
+### Reference PSF
+
+`src/euclid_vis_isotropic_min_psf.fits` is built by
+[`notebooks/BuildingEuclidVIS_PSF.ipynb`](notebooks/BuildingEuclidVIS_PSF.ipynb)
+from the global VIS PSF model stored next to it (11,664 PSFs: 144 quadrants ×
+9 × 9). It is an isotropic PSF whose Fourier amplitude is at least that of every
+PSF of the field (to within 0.15 %), so that `psf_residual` stays bounded. The
+notebook takes the pointwise maximum of the PSF Fourier amplitudes, makes it
+isotropic by rotation, then finds a positive image with this amplitude by
+alternating projections. Re-running it gives the same file.
+
 ## Repository layout
 
 ```
@@ -150,7 +162,9 @@ src/
 utils/
   db_utils.py            Euclid archive queries, downloads, quadrant slicing
 notebooks/
-  Clipping_study.ipynb   pixel-value histograms of sci_subtracted
+  BuildingEuclidVIS_PSF.ipynb    builds the reference PSF from the VIS PSF model
+  EUC_VIS_GRD-PSF-*.fits         global VIS PSF model (notebook input)
+  Clipping_study.ipynb           pixel-value histograms of sci_subtracted
 push.py                  concatenate the batches saved in $SCRATCH/datasets/batch* and push them
 ```
 
